@@ -57,7 +57,7 @@ except ImportError as e:
 app = FastAPI(
     title="KSL Model API",
     version="2.0.0",
-    description="Kuwaiti Sign Language Recognition API"
+    description="Kenya Sign Language Recognition API"
 )
 
 app.add_middleware(

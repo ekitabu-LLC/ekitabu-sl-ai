@@ -1,6 +1,6 @@
 # KSL Model Testing Frontend
 
-A React-based frontend for testing Kuwaiti Sign Language (KSL) recognition models.
+A React-based frontend for testing Kenya Sign Language (KSL) recognition models.
 
 ## Features
 

@@ -188,7 +188,7 @@ function App() {
           </h2>
 
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-            Advanced Kuwaiti Sign Language recognition powered by
+            Advanced Kenya Sign Language recognition powered by
             Spatial-Temporal Graph Convolutional Networks
           </p>
         </motion.div>
