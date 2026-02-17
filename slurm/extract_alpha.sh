@@ -56,7 +56,7 @@ python extract_landmarks_alpha.py \
     --alpha-dir "$ALPHA_DIR" \
     --output-dir "$PROJECT_DIR/data" \
     --split all \
-    --workers 64 && EXIT_CODE=0 || EXIT_CODE=$?
+    --workers 32 && EXIT_CODE=0 || EXIT_CODE=$?
 
 echo ""
 echo "=========================================="

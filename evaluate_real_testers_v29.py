@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-Evaluate v26 model on real-world test signers.
+Evaluate v29 model on real-world test signers.
 
-V26 evaluates models trained on the ksl-alpha dataset (15 signers).
-Architecture and preprocessing are identical to v25 (hand-body features, same aux_dim).
+V29 changes from v27:
+- 8 GCN layers (not 4), channels: ic->64->64->128->128->128->128->128->128
+- Dilated TCN with kernel=3, dilations=(1,2,4) instead of multi-scale kernels (3,5,7)
+- 4 attention heads (not 2) => gcn_embed_dim = 512
+- Wider aux branch: 128-dim output (not 64)
+- embed_dim = 640 (512 + 128), classifier: 640->128->nc
+- dropout=0.2 (not 0.3), spatial_dropout=0.1
 
-V26 changes from v25:
-- Training data: ksl-alpha dataset (signers 1-12 train, 13-15 test)
-- MediaPipe version: same version used for both training and evaluation (both on Alpine)
-- Optional ksl-alpha test set evaluation (signers 13-15, pre-extracted .npy files)
-
-V25/v26 shared features:
-- Hand-to-body spatial features (8 features) computed BEFORE wrist-centric normalization
-- Updated aux_dim: NUM_ANGLE_FEATURES + 20 fingertip distances + 8 hand-body features
-- Temporal CutMix used during training (no effect on eval)
+Evaluation modes:
+- baseline: standard model (best_model.pt)
+- adabn_global: AdaBN on all test data (best_model.pt)
+- ema: EMA model (best_model_ema.pt)
 
 Usage:
-    python evaluate_real_testers_v26.py
+    python evaluate_real_testers_v29.py
 """
 
+import copy
+import math
 import os
 import sys
 import json
 import numpy as np
 import cv2
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from collections import defaultdict
 from datetime import datetime
@@ -33,20 +36,25 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import mediapipe as mp
 
+
 # ---------------------------------------------------------------------------
 # MediaPipe version check
 # ---------------------------------------------------------------------------
 
 def check_mediapipe_version():
-    """Check MediaPipe version. V26 training data was extracted on Alpine with the same
-    MediaPipe version as evaluation, so no version mismatch is expected."""
+    """Check MediaPipe version. V29 uses same 0.10.5 extracted data as v27."""
     version = mp.__version__
+    expected = "0.10.5"
     print(f"  MediaPipe version: {version}")
-    print(f"  (v26 training data was extracted with the same MediaPipe version on Alpine)")
+    if version == expected:
+        print(f"  (matches v29 training data extraction version)")
+    else:
+        print(f"  WARNING: Expected {expected} (v29 training data version). "
+              f"Landmark coordinates may differ.")
 
 
 # ---------------------------------------------------------------------------
-# Constants (matching train_ksl_v25.py -- v26 uses same architecture)
+# Constants (matching train_ksl_v29.py)
 # ---------------------------------------------------------------------------
 
 POSE_INDICES = [11, 12, 13, 14, 15, 16]
@@ -70,7 +78,7 @@ PARENT_MAP = LH_PARENT + RH_PARENT + POSE_PARENT
 
 MAX_FRAMES = 90
 
-# Joint angle topology (same as train_ksl_v25.py)
+# Joint angle topology
 def _build_angle_joints():
     children = defaultdict(list)
     for child_idx, parent_idx in enumerate(PARENT_MAP):
@@ -93,8 +101,277 @@ LH_TIPS = [4, 8, 12, 16, 20]
 RH_TIPS = [25, 29, 33, 37, 41]
 NUM_FINGERTIP_PAIRS = 10
 
-# Hand-body spatial features count (v25 NEW)
+# Hand-body spatial features count
 NUM_HAND_BODY_FEATURES = 8
+
+
+# ---------------------------------------------------------------------------
+# Graph Topology (matching train_ksl_v29.py exactly)
+# ---------------------------------------------------------------------------
+
+HAND_EDGES = [
+    (0, 1), (0, 5), (0, 9), (0, 13), (0, 17),
+    (1, 2), (2, 3), (3, 4), (5, 6), (6, 7), (7, 8),
+    (9, 10), (10, 11), (11, 12), (13, 14), (14, 15), (15, 16),
+    (17, 18), (18, 19), (19, 20), (5, 9), (9, 13), (13, 17),
+]
+
+POSE_EDGES = [
+    (42, 43), (42, 44), (43, 45), (44, 46), (45, 47), (46, 0), (47, 21),
+]
+
+
+# ---------------------------------------------------------------------------
+# Adjacency Matrix Builder (matching train_ksl_v29.py exactly)
+# ---------------------------------------------------------------------------
+
+def build_adj(n=48):
+    adj = np.zeros((n, n))
+    for i, j in HAND_EDGES:
+        adj[i, j] = adj[j, i] = 1
+    for i, j in HAND_EDGES:
+        adj[i + 21, j + 21] = adj[j + 21, i + 21] = 1
+    for i, j in POSE_EDGES:
+        adj[i, j] = adj[j, i] = 1
+    adj[0, 21] = adj[21, 0] = 0.3
+    adj += np.eye(n)
+    d = np.sum(adj, axis=1)
+    d_inv = np.power(d, -0.5)
+    d_inv[np.isinf(d_inv)] = 0
+    return torch.FloatTensor(np.diag(d_inv) @ adj @ np.diag(d_inv))
+
+
+# ---------------------------------------------------------------------------
+# V29 Model Architecture (copied EXACTLY from train_ksl_v29.py)
+# ---------------------------------------------------------------------------
+
+class DilatedMultiScaleTCN(nn.Module):
+    """Dilated multi-scale temporal convolution.
+
+    Uses kernel_size=3 with dilations=(1,2,4) instead of kernels=(3,5,7).
+    Effective receptive fields: 3, 5, 9 with fewer parameters.
+    """
+
+    def __init__(self, channels, dilations=(1, 2, 4), stride=1, dropout=0.2):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channels, channels, (3, 1),
+                          padding=(d, 0), dilation=(d, 1), stride=(stride, 1)),
+                nn.BatchNorm2d(channels),
+            )
+            for d in dilations
+        ])
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out = sum(branch(x) for branch in self.branches) / len(self.branches)
+        return self.dropout(out)
+
+
+class AttentionPool(nn.Module):
+    def __init__(self, in_channels, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        mid = in_channels // 2
+
+        self.heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_channels, mid),
+                nn.Tanh(),
+                nn.Linear(mid, 1),
+            )
+            for _ in range(num_heads)
+        ])
+
+    def forward(self, x):
+        b, c, t = x.shape
+        x_t = x.permute(0, 2, 1)  # (B, T, C)
+
+        outs = []
+        for head in self.heads:
+            attn_logits = head(x_t)
+            attn_weights = F.softmax(attn_logits, dim=1)
+            pooled = (x_t * attn_weights).sum(dim=1)
+            outs.append(pooled)
+
+        return torch.cat(outs, dim=1)  # (B, num_heads * C)
+
+
+class SpatialNodeDropout(nn.Module):
+    def __init__(self, p=0.1):
+        super().__init__()
+        self.p = p
+
+    def forward(self, x):
+        if not self.training or self.p == 0:
+            return x
+        B, C, T, N = x.shape
+        mask = torch.ones(B, 1, 1, N, device=x.device)
+        mask = F.dropout(mask, p=self.p, training=True)
+        return x * mask
+
+
+class GradientReversalFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambda_ * grad_output, None
+
+
+class GConv(nn.Module):
+    def __init__(self, i, o):
+        super().__init__()
+        self.fc = nn.Linear(i, o)
+
+    def forward(self, x, adj):
+        return self.fc(torch.matmul(adj, x))
+
+
+class STGCNBlock(nn.Module):
+    def __init__(self, ic, oc, adj, temporal_dilations=(1, 2, 4), st=1, dr=0.2,
+                 spatial_dropout=0.1):
+        super().__init__()
+        self.register_buffer("adj", adj)
+        self.gcn = GConv(ic, oc)
+        self.bn1 = nn.BatchNorm2d(oc)
+        self.tcn = DilatedMultiScaleTCN(oc, temporal_dilations, st, dr)
+        self.residual = (
+            nn.Sequential(nn.Conv2d(ic, oc, 1, stride=(st, 1)), nn.BatchNorm2d(oc))
+            if ic != oc or st != 1
+            else nn.Identity()
+        )
+        self.dropout = nn.Dropout(dr)
+        self.spatial_drop = SpatialNodeDropout(spatial_dropout)
+
+    def forward(self, x):
+        r = self.residual(x)
+        b, c, t, n = x.shape
+        x = self.gcn(x.permute(0, 2, 3, 1).reshape(b * t, n, c), self.adj)
+        x = x.reshape(b, t, n, -1).permute(0, 3, 1, 2)
+        x = torch.relu(self.bn1(x))
+        x = self.spatial_drop(x)
+        x = self.tcn(x)
+        return torch.relu(x + r)
+
+
+class KSLGraphNetV29(nn.Module):
+    """
+    V29 ST-GCN with:
+    - 8 GCN layers: ic->64->64->128->128->128->128->128->128
+    - Dilated multi-scale TCN (k=3, d={1,2,4})
+    - 4-head attention pooling (gcn_embed_dim = 4*128 = 512)
+    - Wider aux branch (128-dim output with temporal conv1d)
+    - Wider classifier: 640->128->nc
+    - Signer-adversarial head with GRL
+    - Embedding output for SupCon loss
+    """
+
+    def __init__(self, nc, num_signers, aux_dim, nn_=48, ic=9, hd=64, nl=8,
+                 td=(1, 2, 4), dr=0.2, spatial_dropout=0.1, adj=None):
+        super().__init__()
+        self.register_buffer("adj", adj)
+        self.data_bn = nn.BatchNorm1d(nn_ * ic)
+
+        # Channel progression: ic->64->64->128->128->128->128->128->128
+        ch = [ic, 64, 64, 128, 128, 128, 128, 128, 128]
+        ch = ch[:nl + 1]
+
+        self.layers = nn.ModuleList(
+            [STGCNBlock(ch[i], ch[i + 1], adj, td,
+                        2 if i in [1, 3] else 1,
+                        dr, spatial_dropout)
+             for i in range(nl)]
+        )
+
+        final_ch = ch[-1]
+
+        # Attention pooling for GCN output: 4 heads
+        self.attn_pool = AttentionPool(final_ch, num_heads=4)
+        gcn_embed_dim = 4 * final_ch  # 4 heads * 128 = 512
+
+        # v29: WIDER Auxiliary MLP for angle/distance features
+        # aux_mlp: aux_dim -> 256 -> 128 (was aux_dim -> 128 -> 64)
+        self.aux_bn = nn.BatchNorm1d(aux_dim)
+        self.aux_mlp = nn.Sequential(
+            nn.Linear(aux_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(dr),
+            nn.Linear(256, 128),
+        )
+        # v29: Wider temporal conv (128 channels, was 64)
+        self.aux_temporal_conv = nn.Sequential(
+            nn.Conv1d(128, 128, kernel_size=5, padding=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+        )
+        # Temporal attention pooling for aux features (over 128-dim)
+        self.aux_attn = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+
+        # Combined embedding dimension: 512 + 128 = 640 (was 256 + 64 = 320)
+        self.embed_dim = gcn_embed_dim + 128
+
+        # v29: Wider classifier: 640->128->nc (was 320->64->nc)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.embed_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dr),
+            nn.Linear(128, nc),
+        )
+
+        # v29: Wider signer adversarial head: 640->128->num_signers (was 320->64->num_signers)
+        self.signer_head = nn.Sequential(
+            nn.Linear(self.embed_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_signers),
+        )
+
+    def forward(self, gcn_input, aux_input, grl_lambda=0.0):
+        b, c, t, n = gcn_input.shape
+
+        # GCN branch
+        x = self.data_bn(
+            gcn_input.permute(0, 1, 3, 2).reshape(b, c * n, t)
+        ).reshape(b, c, n, t).permute(0, 1, 3, 2)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x_node_avg = x.mean(dim=3)  # (B, C_final, T')
+        gcn_embedding = self.attn_pool(x_node_avg)  # (B, gcn_embed_dim)
+
+        # Wider auxiliary branch with temporal conv
+        aux = self.aux_bn(aux_input.permute(0, 2, 1)).permute(0, 2, 1)
+        aux = self.aux_mlp(aux)  # (B, T, 128)
+
+        aux_t = aux.permute(0, 2, 1)  # (B, 128, T)
+        aux_t = self.aux_temporal_conv(aux_t)  # (B, 128, T)
+        aux = aux_t.permute(0, 2, 1)  # (B, T, 128)
+
+        attn_logits = self.aux_attn(aux)  # (B, T, 1)
+        attn_weights = F.softmax(attn_logits, dim=1)  # (B, T, 1)
+        aux_embedding = (aux * attn_weights).sum(dim=1)  # (B, 128)
+
+        # Combine embeddings
+        embedding = torch.cat([gcn_embedding, aux_embedding], dim=1)  # (B, 640)
+
+        # Classification
+        logits = self.classifier(embedding)
+
+        # Signer adversarial
+        reversed_embedding = GradientReversalFunction.apply(embedding, grl_lambda)
+        signer_logits = self.signer_head(reversed_embedding)
+
+        return logits, signer_logits, embedding
+
 
 # ---------------------------------------------------------------------------
 # Video -> Landmarks extraction
@@ -156,7 +433,7 @@ def extract_landmarks_from_video(video_path):
 
 
 # ---------------------------------------------------------------------------
-# Preprocessing (matching v25 dataset pipeline, no augmentation)
+# Preprocessing (matching v25/v27 dataset pipeline, no augmentation)
 # ---------------------------------------------------------------------------
 
 def compute_bones(h):
@@ -220,47 +497,29 @@ def compute_hand_body_features(h_raw):
     h_raw: (T, 48, 3) -- raw landmarks, not yet normalized
 
     Returns: (T, 8) feature vector per frame
-
-    Features:
-        0: Left hand height relative to mid-shoulder / shoulder_width
-        1: Right hand height relative to mid-shoulder / shoulder_width
-        2: Left hand lateral pos relative to mid-shoulder / shoulder_width
-        3: Right hand lateral pos relative to mid-shoulder / shoulder_width
-        4: Inter-hand distance / shoulder_width
-        5: Left hand distance to face / shoulder_width
-        6: Right hand distance to face / shoulder_width
-        7: |left_hand_height - right_hand_height| / shoulder_width
     """
     T = h_raw.shape[0]
     features = np.zeros((T, 8), dtype=np.float32)
 
-    # Body reference points (pose nodes 42=L_shoulder, 43=R_shoulder)
-    mid_shoulder = (h_raw[:, 42, :] + h_raw[:, 43, :]) / 2  # (T, 3)
+    mid_shoulder = (h_raw[:, 42, :] + h_raw[:, 43, :]) / 2
     shoulder_width = np.linalg.norm(
         h_raw[:, 42, :] - h_raw[:, 43, :], axis=-1, keepdims=True
-    )  # (T, 1)
+    )
     shoulder_width = np.maximum(shoulder_width, 1e-6)
 
-    # Hand centroids (mean of all hand landmarks)
-    lh_centroid = h_raw[:, :21, :].mean(axis=1)   # (T, 3)
-    rh_centroid = h_raw[:, 21:42, :].mean(axis=1)  # (T, 3)
+    lh_centroid = h_raw[:, :21, :].mean(axis=1)
+    rh_centroid = h_raw[:, 21:42, :].mean(axis=1)
 
-    # Feature 0-1: Left/Right hand height relative to mid-shoulder (normalized by shoulder width)
     features[:, 0] = (lh_centroid[:, 1] - mid_shoulder[:, 1]) / shoulder_width[:, 0]
     features[:, 1] = (rh_centroid[:, 1] - mid_shoulder[:, 1]) / shoulder_width[:, 0]
-
-    # Feature 2-3: Left/Right hand lateral position relative to mid-shoulder
     features[:, 2] = (lh_centroid[:, 0] - mid_shoulder[:, 0]) / shoulder_width[:, 0]
     features[:, 3] = (rh_centroid[:, 0] - mid_shoulder[:, 0]) / shoulder_width[:, 0]
-
-    # Feature 4: Inter-hand distance (normalized by shoulder width)
     features[:, 4] = np.linalg.norm(
         lh_centroid - rh_centroid, axis=-1
     ) / shoulder_width[:, 0]
 
-    # Feature 5-6: Hand distance to face (approximate face as above shoulders)
     face_approx = mid_shoulder.copy()
-    face_approx[:, 1] -= shoulder_width[:, 0] * 0.7  # approximate face position
+    face_approx[:, 1] -= shoulder_width[:, 0] * 0.7
     features[:, 5] = np.linalg.norm(
         lh_centroid - face_approx, axis=-1
     ) / shoulder_width[:, 0]
@@ -268,7 +527,6 @@ def compute_hand_body_features(h_raw):
         rh_centroid - face_approx, axis=-1
     ) / shoulder_width[:, 0]
 
-    # Feature 7: Symmetry score (are hands at same height?)
     features[:, 7] = np.abs(lh_centroid[:, 1] - rh_centroid[:, 1]) / shoulder_width[:, 0]
 
     return features
@@ -313,11 +571,11 @@ def normalize_wrist_palm(h):
 
 
 def preprocess_landmarks(raw, max_frames=MAX_FRAMES):
-    """Preprocess raw (num_frames, 225) landmarks to v25 format.
+    """Preprocess raw (num_frames, 225) landmarks to v29 format.
 
     Returns:
         gcn_tensor: (9, max_frames, 48)
-        aux_tensor: (max_frames, D_aux)  where D_aux = angles + fingertip_dists + hand_body_features
+        aux_tensor: (max_frames, D_aux)
     """
     f = raw.shape[0]
 
@@ -333,10 +591,10 @@ def preprocess_landmarks(raw, max_frames=MAX_FRAMES):
 
     h = np.concatenate([lh, rh, pose], axis=1).astype(np.float32)
 
-    # v25: Compute hand-body features BEFORE normalization (on raw landmarks)
-    hand_body_feats = compute_hand_body_features(h)  # (f, 8)
+    # Compute hand-body features BEFORE normalization
+    hand_body_feats = compute_hand_body_features(h)
 
-    # Normalization (destroys hand-body spatial relationships)
+    # Normalization
     h = normalize_wrist_palm(h)
 
     # Velocity before resampling
@@ -346,7 +604,7 @@ def preprocess_landmarks(raw, max_frames=MAX_FRAMES):
     # Bone features
     bones = compute_bones(h)
 
-    # Auxiliary features (computed on normalized data, same as v22)
+    # Auxiliary features
     joint_angles = compute_joint_angles(h)
     fingertip_dists = compute_fingertip_distances(h)
 
@@ -382,7 +640,7 @@ def preprocess_landmarks(raw, max_frames=MAX_FRAMES):
 
 
 # ---------------------------------------------------------------------------
-# Test-Time Augmentation (TTA) - adapted for v25
+# Test-Time Augmentation (TTA)
 # ---------------------------------------------------------------------------
 
 def apply_tta(raw, max_frames=MAX_FRAMES):
@@ -445,6 +703,35 @@ def apply_tta(raw, max_frames=MAX_FRAMES):
         augmented.append((gcn_r, aux_r))
 
     return augmented
+
+
+# ---------------------------------------------------------------------------
+# AdaBN: Adaptive Batch Normalization
+# ---------------------------------------------------------------------------
+
+def adapt_bn_stats(model, data_list, device):
+    """Reset BN stats and recompute from test data.
+
+    Args:
+        model: nn.Module with BatchNorm layers
+        data_list: list of (gcn_tensor, aux_tensor) tuples (unbatched)
+        device: torch device
+    """
+    if len(data_list) == 0:
+        return
+
+    # Reset all BN layers
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            m.reset_running_stats()
+            m.momentum = None  # use cumulative moving average
+
+    # Forward pass in train mode to accumulate stats
+    model.train()
+    with torch.no_grad():
+        for gcn, aux in data_list:
+            model(gcn.unsqueeze(0).to(device), aux.unsqueeze(0).to(device), grl_lambda=0.0)
+    model.eval()
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +808,7 @@ def discover_test_videos(base_dir):
 
 
 # ---------------------------------------------------------------------------
-# Inference (v26: same as v25/v22, no ArcFace, no labels in forward)
+# Inference
 # ---------------------------------------------------------------------------
 
 def run_inference(model, raw, device, classes, use_tta=True):
@@ -591,10 +878,14 @@ def run_inference(model, raw, device, classes, use_tta=True):
 
 
 # ---------------------------------------------------------------------------
-# Evaluate one category
+# Evaluate one category (single model, with TTA and no-TTA)
 # ---------------------------------------------------------------------------
 
-def evaluate_category(category_name, videos, model, device, classes):
+def evaluate_category(category_name, videos, model, device, classes, mode_name="baseline"):
+    """Evaluate a single model variant on a category.
+
+    Tracks both TTA and no-TTA accuracy.
+    """
     c2i = {c: i for i, c in enumerate(classes)}
     i2c = {i: c for c, i in c2i.items()}
 
@@ -611,9 +902,10 @@ def evaluate_category(category_name, videos, model, device, classes):
                     "LOW": {"correct": 0, "total": 0}}
 
     for video_path, true_class, signer in videos:
-        print(f"\n  Processing: {os.path.basename(video_path)} (class={true_class}, {signer})")
+        print(f"\n  [{mode_name}] Processing: {os.path.basename(video_path)} "
+              f"(class={true_class}, {signer})")
 
-        # Use pre-extracted landmarks if available, otherwise extract live
+        # Use pre-extracted landmarks if available
         npy_cache = video_path + ".landmarks.npy"
         if os.path.exists(npy_cache):
             raw = np.load(npy_cache)
@@ -696,8 +988,8 @@ def evaluate_category(category_name, videos, model, device, classes):
     acc_tta = 100.0 * correct_tta / total if total > 0 else 0.0
     acc_noTTA = 100.0 * correct_noTTA / total if total > 0 else 0.0
 
-    print(f"\n  {category_name.upper()} OVERALL (TTA):   {correct_tta}/{total} = {acc_tta:.1f}%")
-    print(f"  {category_name.upper()} OVERALL (no-TTA): {correct_noTTA}/{total} = {acc_noTTA:.1f}%")
+    print(f"\n  {category_name.upper()} [{mode_name}] (TTA):   {correct_tta}/{total} = {acc_tta:.1f}%")
+    print(f"  {category_name.upper()} [{mode_name}] (no-TTA): {correct_noTTA}/{total} = {acc_noTTA:.1f}%")
     tta_diff = acc_tta - acc_noTTA
     print(f"  TTA effect: {'+' if tta_diff >= 0 else ''}{tta_diff:.1f}%")
 
@@ -736,7 +1028,7 @@ def evaluate_category(category_name, videos, model, device, classes):
         print(f"      Rejection rate: {conf_buckets['LOW']['total']}/{total} "
               f"= {100.0 * conf_buckets['LOW']['total'] / total:.0f}%")
 
-    print(f"\n  Confusion Matrix ({category_name}):")
+    print(f"\n  Confusion Matrix ({category_name}, {mode_name}):")
     hdr = "True\\Pred  " + " ".join(f"{i2c[j]:>5s}" for j in range(nc))
     print(f"    {hdr}")
     for i in range(nc):
@@ -744,6 +1036,7 @@ def evaluate_category(category_name, videos, model, device, classes):
         print(f"    {row_str}")
 
     return {
+        "mode": mode_name,
         "overall_tta": acc_tta,
         "overall_noTTA": acc_noTTA,
         "correct_tta": correct_tta,
@@ -771,139 +1064,59 @@ def evaluate_category(category_name, videos, model, device, classes):
 
 
 # ---------------------------------------------------------------------------
-# ksl-alpha test set evaluation (signers 13-15, pre-extracted .npy files)
+# Pre-extract all test data for AdaBN
 # ---------------------------------------------------------------------------
 
-def evaluate_alpha_test_set(test_dir, model, device, classes, category_name):
-    """Evaluate on ksl-alpha test set (.npy files, no video extraction needed).
+def preextract_test_data(videos):
+    """Pre-extract and preprocess all test videos.
 
-    Expected directory structure:
-        test_dir/
-            <ClassName>/
-                <signer>_<sample>.npy   (shape: num_frames x 225)
-
-    Each .npy file contains raw MediaPipe landmarks (same format as training data).
-    Returns results dict or None if no test files found.
+    Returns list of (gcn_tensor, aux_tensor) tuples.
     """
-    c2i = {c: i for i, c in enumerate(classes)}
-    i2c = {i: c for c, i in c2i.items()}
-
-    # Discover .npy files
-    test_samples = []
-    for cls_name in sorted(os.listdir(test_dir)):
-        cls_path = os.path.join(test_dir, cls_name)
-        if not os.path.isdir(cls_path):
-            continue
-        if cls_name not in c2i:
-            continue
-        for fn in sorted(os.listdir(cls_path)):
-            if not fn.endswith(".npy"):
+    data_list = []
+    for video_path, true_class, signer in videos:
+        npy_cache = video_path + ".landmarks.npy"
+        if os.path.exists(npy_cache):
+            raw = np.load(npy_cache)
+        else:
+            raw = extract_landmarks_from_video(video_path)
+            if raw is None:
                 continue
-            npy_path = os.path.join(cls_path, fn)
-            # Try to extract signer ID from filename
-            signer_id = fn.split("_")[0] if "_" in fn else "unknown"
-            test_samples.append((npy_path, cls_name, signer_id))
-
-    if not test_samples:
-        print(f"\n  No .npy test files found in {test_dir} for {category_name}")
-        return None
-
-    print(f"\n  Found {len(test_samples)} {category_name} test samples in ksl-alpha test set")
-
-    correct, total = 0, 0
-    per_class = {}
-    per_signer = {}
-    nc = len(classes)
-    confusion = [[0] * nc for _ in range(nc)]
-    details = []
-
-    for npy_path, true_class, signer_id in test_samples:
-        raw = np.load(npy_path).astype(np.float32)
-        if raw.ndim != 2 or raw.shape[1] < 225:
-            print(f"    SKIP: {os.path.basename(npy_path)} has unexpected shape {raw.shape}")
-            continue
 
         gcn, aux = preprocess_landmarks(raw)
         if gcn is None:
-            print(f"    SKIP: {os.path.basename(npy_path)} preprocessing failed")
             continue
 
-        with torch.no_grad():
-            logits, _, _ = model(
-                gcn.unsqueeze(0).to(device),
-                aux.unsqueeze(0).to(device),
-                grl_lambda=0.0,
-            )
-            probs = F.softmax(logits, dim=1).cpu().squeeze(0)
-            pred_idx = probs.argmax().item()
-            confidence = probs[pred_idx].item()
+        data_list.append((gcn, aux))
 
-        pred_class = i2c[pred_idx]
-        is_correct = (pred_class == true_class)
-        correct += int(is_correct)
-        total += 1
+    return data_list
 
-        true_idx = c2i.get(true_class, -1)
-        if true_idx >= 0 and pred_idx >= 0:
-            confusion[true_idx][pred_idx] += 1
 
-        if true_class not in per_class:
-            per_class[true_class] = {"correct": 0, "total": 0}
-        per_class[true_class]["total"] += 1
-        per_class[true_class]["correct"] += int(is_correct)
+# ---------------------------------------------------------------------------
+# Build v29 model from checkpoint
+# ---------------------------------------------------------------------------
 
-        if signer_id not in per_signer:
-            per_signer[signer_id] = {"correct": 0, "total": 0}
-        per_signer[signer_id]["total"] += 1
-        per_signer[signer_id]["correct"] += int(is_correct)
+def build_model_from_ckpt(ckpt, device, nc, num_nodes=48):
+    """Create a KSLGraphNetV29 model from checkpoint config."""
+    config = ckpt["config"]
+    num_signers = ckpt.get("num_signers", 12)
+    aux_dim = ckpt.get("aux_dim", NUM_ANGLE_FEATURES + 2 * NUM_FINGERTIP_PAIRS + NUM_HAND_BODY_FEATURES)
+    adj = build_adj(num_nodes).to(device)
 
-        details.append({
-            "file": os.path.basename(npy_path),
-            "signer": signer_id,
-            "true": true_class,
-            "pred": pred_class,
-            "correct": is_correct,
-            "confidence": confidence,
-        })
+    model = KSLGraphNetV29(
+        nc=nc,
+        num_signers=num_signers,
+        aux_dim=aux_dim,
+        nn_=num_nodes,
+        ic=config.get("in_channels", 9),
+        hd=config.get("hidden_dim", 64),
+        nl=config.get("num_layers", 8),
+        td=tuple(config.get("temporal_dilations", [1, 2, 4])),
+        dr=config.get("dropout", 0.2),
+        spatial_dropout=config.get("spatial_dropout", 0.1),
+        adj=adj,
+    ).to(device)
 
-    if total == 0:
-        print(f"  No valid samples processed for {category_name} alpha test set")
-        return None
-
-    acc = 100.0 * correct / total
-    print(f"\n  KSL-ALPHA TEST SET - {category_name.upper()}: {correct}/{total} = {acc:.1f}%")
-
-    print(f"\n  Per-class accuracy (alpha test):")
-    print(f"    {'Class':>12s}  {'Acc':>7s}  {'N':>3s}")
-    for cls in classes:
-        if cls in per_class:
-            pc = per_class[cls]
-            cls_acc = 100.0 * pc["correct"] / pc["total"]
-            print(f"    {cls:>12s}  {cls_acc:5.0f}%   {pc['total']:3d}")
-
-    print(f"\n  Per-signer accuracy (alpha test):")
-    print(f"    {'Signer':>12s}  {'Acc':>7s}  {'N':>3s}")
-    for sid in sorted(per_signer.keys()):
-        ps = per_signer[sid]
-        s_acc = 100.0 * ps["correct"] / ps["total"]
-        print(f"    {sid:>12s}  {s_acc:5.0f}%   {ps['total']:3d}")
-
-    return {
-        "overall_accuracy": acc,
-        "correct": correct,
-        "total": total,
-        "per_class": {k: {
-            "accuracy": 100.0 * v["correct"] / v["total"],
-            **v
-        } for k, v in per_class.items()},
-        "per_signer": {k: {
-            "accuracy": 100.0 * v["correct"] / v["total"],
-            **v
-        } for k, v in per_signer.items()},
-        "confusion_matrix": confusion,
-        "confusion_labels": [i2c[i] for i in range(nc)],
-        "details": details,
-    }
+    return model, aux_dim
 
 
 # ---------------------------------------------------------------------------
@@ -913,11 +1126,12 @@ def evaluate_alpha_test_set(test_dir, model, device, classes, category_name):
 def main():
     base_dir = "/scratch/alpine/hama5612/ksl-alpha/data/real_testers"
     ckpt_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/checkpoints"
-    alpha_test_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/test_alpha"
 
     print("=" * 70)
-    print("V26 Real-World Evaluation (with TTA + Confidence Analysis)")
-    print(f"Trained on ksl-alpha dataset (15 signers)")
+    print("V29 Real-World Evaluation (Deeper ST-GCN + AdaBN + EMA)")
+    print(f"Architecture: 8 GCN layers, dilated TCN (k=3, d=1,2,4), 4-head attn")
+    print(f"embed_dim=640 (512 gcn + 128 aux), dropout=0.2")
+    print(f"Modes: baseline, adabn_global, EMA")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
@@ -940,181 +1154,167 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # Import v25 model class (v26 uses same architecture as v25)
-    from train_ksl_v25 import KSLGraphNetV25, build_adj
+    all_results = {}
 
-    results = {}
+    for cat_name, cat_videos, classes in [
+        ("numbers", numbers_videos, NUMBER_CLASSES),
+        ("words", words_videos, WORD_CLASSES),
+    ]:
+        ckpt_path = os.path.join(ckpt_dir, f"v29_{cat_name}", "best_model.pt")
+        ema_ckpt_path = os.path.join(ckpt_dir, f"v29_{cat_name}", "best_model_ema.pt")
 
-    # ===== NUMBERS =====
-    numbers_ckpt = os.path.join(ckpt_dir, "v26_numbers", "best_model.pt")
-    if os.path.exists(numbers_ckpt) and numbers_videos:
+        if not cat_videos:
+            print(f"\nSkipping {cat_name}: no test videos")
+            continue
+
+        if not os.path.exists(ckpt_path):
+            print(f"\nSkipping {cat_name}: checkpoint not found at {ckpt_path}")
+            continue
+
         print(f"\n{'='*70}")
-        print(f"NUMBERS EVALUATION ({len(numbers_videos)} videos)")
+        print(f"{cat_name.upper()} EVALUATION ({len(cat_videos)} videos)")
         print(f"{'='*70}")
 
-        ckpt = torch.load(numbers_ckpt, map_location=device, weights_only=False)
-        config = ckpt["config"]
-        adj = build_adj(config["num_nodes"]).to(device)
-        tk = tuple(config.get("temporal_kernels", [3, 5, 7]))
-        num_signers = ckpt.get("num_signers", 10)
-        aux_dim = ckpt.get("aux_dim", NUM_ANGLE_FEATURES + 2 * NUM_FINGERTIP_PAIRS + NUM_HAND_BODY_FEATURES)
-
-        model = KSLGraphNetV25(
-            nc=len(NUMBER_CLASSES),
-            num_signers=num_signers,
-            aux_dim=aux_dim,
-            nn_=config["num_nodes"],
-            ic=config["in_channels"],
-            hd=config["hidden_dim"],
-            nl=config["num_layers"],
-            tk=tk,
-            dr=config["dropout"],
-            spatial_dropout=config.get("spatial_dropout", 0.1),
-            adj=adj,
-        ).to(device)
+        # ===== Load baseline model =====
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model, aux_dim = build_model_from_ckpt(ckpt, device, len(classes))
         model.load_state_dict(ckpt["model"])
         model.eval()
-        print(f"Loaded numbers model: {numbers_ckpt}")
-        print(f"  Val accuracy: {ckpt['val_acc']:.1f}%, epoch {ckpt['epoch']}")
+
         param_count = sum(p.numel() for p in model.parameters())
+        print(f"Loaded {cat_name} model: {ckpt_path}")
+        print(f"  Val accuracy: {ckpt['val_acc']:.1f}%, epoch {ckpt['epoch']}")
         print(f"  Parameters: {param_count:,}")
-        print(f"  Aux dim: {aux_dim} (angles={NUM_ANGLE_FEATURES}, fingertip_dists=20, hand_body=8)")
+        print(f"  Aux dim: {aux_dim} (angles={NUM_ANGLE_FEATURES}, "
+              f"fingertip_dists=20, hand_body=8)")
 
-        results["numbers"] = evaluate_category(
-            "Numbers", numbers_videos, model, device, NUMBER_CLASSES
+        cat_results = {}
+
+        # ===== MODE 1: Baseline (no AdaBN, standard model) =====
+        print(f"\n--- Mode: BASELINE (standard model, no AdaBN) ---")
+        baseline_result = evaluate_category(
+            cat_name, cat_videos, model, device, classes, mode_name="baseline"
         )
+        cat_results["baseline"] = baseline_result
 
-        # ksl-alpha test set evaluation for numbers
-        # test_alpha/ contains class subdirs directly (e.g., test_alpha/100/, test_alpha/Apple/)
-        if os.path.isdir(alpha_test_dir):
-            alpha_result = evaluate_alpha_test_set(
-                alpha_test_dir, model, device, NUMBER_CLASSES, "Numbers"
+        # ===== MODE 2: AdaBN Global =====
+        print(f"\n--- Mode: AdaBN GLOBAL ---")
+        adabn_model = copy.deepcopy(model)
+
+        # Pre-extract test data and adapt BN stats
+        print(f"  Pre-extracting test data for AdaBN...")
+        test_data = preextract_test_data(cat_videos)
+        print(f"  Adapting BN stats on {len(test_data)} samples...")
+        adapt_bn_stats(adabn_model, test_data, device)
+
+        adabn_result = evaluate_category(
+            cat_name, cat_videos, adabn_model, device, classes, mode_name="adabn_global"
+        )
+        cat_results["adabn_global"] = adabn_result
+
+        # ===== MODE 3: EMA model =====
+        if os.path.exists(ema_ckpt_path):
+            print(f"\n--- Mode: EMA MODEL ---")
+            ema_ckpt = torch.load(ema_ckpt_path, map_location=device, weights_only=False)
+            ema_model, _ = build_model_from_ckpt(ema_ckpt, device, len(classes))
+            ema_model.load_state_dict(ema_ckpt["model"])
+            ema_model.eval()
+
+            ema_param_count = sum(p.numel() for p in ema_model.parameters())
+            print(f"Loaded EMA model: {ema_ckpt_path}")
+            print(f"  Val accuracy: {ema_ckpt['val_acc']:.1f}%, epoch {ema_ckpt['epoch']}")
+            print(f"  Parameters: {ema_param_count:,}")
+
+            ema_result = evaluate_category(
+                cat_name, cat_videos, ema_model, device, classes, mode_name="ema"
             )
-            if alpha_result is not None:
-                results["alpha_test_numbers"] = alpha_result
-    else:
-        if not os.path.exists(numbers_ckpt):
-            print(f"\nSkipping numbers: checkpoint not found at {numbers_ckpt}")
-        elif not numbers_videos:
-            print(f"\nSkipping numbers: no test videos found")
+            cat_results["ema"] = ema_result
+        else:
+            print(f"\n  Skipping EMA: checkpoint not found at {ema_ckpt_path}")
+            cat_results["ema"] = None
 
-    # ===== WORDS =====
-    words_ckpt = os.path.join(ckpt_dir, "v26_words", "best_model.pt")
-    if os.path.exists(words_ckpt) and words_videos:
+        # ===== Mode comparison =====
         print(f"\n{'='*70}")
-        print(f"WORDS EVALUATION ({len(words_videos)} videos)")
-        print(f"{'='*70}")
+        print(f"{cat_name.upper()} MODE COMPARISON:")
+        print(f"  {'Mode':<20s}  {'TTA':>7s}  {'no-TTA':>7s}")
+        print(f"  {'Baseline':<20s}  {baseline_result['overall_tta']:5.1f}%  "
+              f"{baseline_result['overall_noTTA']:5.1f}%")
+        print(f"  {'AdaBN Global':<20s}  {adabn_result['overall_tta']:5.1f}%  "
+              f"{adabn_result['overall_noTTA']:5.1f}%")
+        if cat_results["ema"] is not None:
+            ema_r = cat_results["ema"]
+            print(f"  {'EMA':<20s}  {ema_r['overall_tta']:5.1f}%  "
+                  f"{ema_r['overall_noTTA']:5.1f}%")
 
-        ckpt = torch.load(words_ckpt, map_location=device, weights_only=False)
-        config = ckpt["config"]
-        adj = build_adj(config["num_nodes"]).to(device)
-        tk = tuple(config.get("temporal_kernels", [3, 5, 7]))
-        num_signers = ckpt.get("num_signers", 10)
-        aux_dim = ckpt.get("aux_dim", NUM_ANGLE_FEATURES + 2 * NUM_FINGERTIP_PAIRS + NUM_HAND_BODY_FEATURES)
+        # Determine best mode
+        mode_accs = {
+            "baseline": baseline_result["overall_noTTA"],
+            "adabn_global": adabn_result["overall_noTTA"],
+        }
+        if cat_results["ema"] is not None:
+            mode_accs["ema"] = cat_results["ema"]["overall_noTTA"]
 
-        model = KSLGraphNetV25(
-            nc=len(WORD_CLASSES),
-            num_signers=num_signers,
-            aux_dim=aux_dim,
-            nn_=config["num_nodes"],
-            ic=config["in_channels"],
-            hd=config["hidden_dim"],
-            nl=config["num_layers"],
-            tk=tk,
-            dr=config["dropout"],
-            spatial_dropout=config.get("spatial_dropout", 0.1),
-            adj=adj,
-        ).to(device)
-        model.load_state_dict(ckpt["model"])
-        model.eval()
-        print(f"Loaded words model: {words_ckpt}")
-        print(f"  Val accuracy: {ckpt['val_acc']:.1f}%, epoch {ckpt['epoch']}")
-        param_count = sum(p.numel() for p in model.parameters())
-        print(f"  Parameters: {param_count:,}")
-        print(f"  Aux dim: {aux_dim} (angles={NUM_ANGLE_FEATURES}, fingertip_dists=20, hand_body=8)")
+        best_mode = max(mode_accs, key=mode_accs.get)
+        print(f"\n  BEST mode (no-TTA): {best_mode} ({mode_accs[best_mode]:.1f}%)")
 
-        results["words"] = evaluate_category(
-            "Words", words_videos, model, device, WORD_CLASSES
-        )
-
-        # ksl-alpha test set evaluation for words
-        # test_alpha/ contains class subdirs directly (e.g., test_alpha/100/, test_alpha/Apple/)
-        if os.path.isdir(alpha_test_dir):
-            alpha_result = evaluate_alpha_test_set(
-                alpha_test_dir, model, device, WORD_CLASSES, "Words"
-            )
-            if alpha_result is not None:
-                results["alpha_test_words"] = alpha_result
-    else:
-        if not os.path.exists(words_ckpt):
-            print(f"\nSkipping words: checkpoint not found at {words_ckpt}")
-        elif not words_videos:
-            print(f"\nSkipping words: no test videos found")
+        cat_results["best_mode"] = best_mode
+        all_results[cat_name] = cat_results
 
     # ===== FINAL SUMMARY =====
     print(f"\n{'='*70}")
-    print("FINAL SUMMARY - V26 Real-World Evaluation")
+    print("FINAL SUMMARY - V29 Real-World Evaluation")
     print(f"{'='*70}")
 
-    if "numbers" in results:
-        r = results["numbers"]
-        print(f"  Numbers (TTA):    {r['overall_tta']:.1f}% ({r['correct_tta']}/{r['total']})")
-        print(f"  Numbers (no-TTA): {r['overall_noTTA']:.1f}% ({r['correct_noTTA']}/{r['total']})")
+    for mode_name in ["baseline", "adabn_global", "ema"]:
+        nums_r = all_results.get("numbers", {}).get(mode_name)
+        wrds_r = all_results.get("words", {}).get(mode_name)
 
-    if "words" in results:
-        r = results["words"]
-        print(f"  Words (TTA):      {r['overall_tta']:.1f}% ({r['correct_tta']}/{r['total']})")
-        print(f"  Words (no-TTA):   {r['overall_noTTA']:.1f}% ({r['correct_noTTA']}/{r['total']})")
+        if nums_r is None and wrds_r is None:
+            continue
 
-    if "numbers" in results and "words" in results:
-        combined_tta = (results["numbers"]["overall_tta"] + results["words"]["overall_tta"]) / 2
-        combined_noTTA = (results["numbers"]["overall_noTTA"] + results["words"]["overall_noTTA"]) / 2
-        print(f"\n  Combined (TTA):    {combined_tta:.1f}%")
-        print(f"  Combined (no-TTA): {combined_noTTA:.1f}%")
-        print(f"  TTA effect:        {combined_tta - combined_noTTA:+.1f}%")
+        nums_tta = nums_r["overall_tta"] if nums_r else 0
+        nums_noTTA = nums_r["overall_noTTA"] if nums_r else 0
+        wrds_tta = wrds_r["overall_tta"] if wrds_r else 0
+        wrds_noTTA = wrds_r["overall_noTTA"] if wrds_r else 0
 
-    # ksl-alpha test set summary
-    if "alpha_test_numbers" in results or "alpha_test_words" in results:
-        print(f"\n  KSL-Alpha Test Set (signers 13-15):")
-        if "alpha_test_numbers" in results:
-            r = results["alpha_test_numbers"]
-            print(f"    Numbers: {r['overall_accuracy']:.1f}% ({r['correct']}/{r['total']})")
-        if "alpha_test_words" in results:
-            r = results["alpha_test_words"]
-            print(f"    Words:   {r['overall_accuracy']:.1f}% ({r['correct']}/{r['total']})")
-        if "alpha_test_numbers" in results and "alpha_test_words" in results:
-            combined_alpha = (
-                results["alpha_test_numbers"]["overall_accuracy"] +
-                results["alpha_test_words"]["overall_accuracy"]
-            ) / 2
-            print(f"    Combined: {combined_alpha:.1f}%")
+        combined_tta = (nums_tta + wrds_tta) / 2 if nums_r and wrds_r else 0
+        combined_noTTA = (nums_noTTA + wrds_noTTA) / 2 if nums_r and wrds_r else 0
 
-    # Confidence summary
-    print(f"\n  Confidence Summary (all predictions):")
+        print(f"\n  {mode_name:>20s}:")
+        print(f"    Numbers  TTA={nums_tta:.1f}%  no-TTA={nums_noTTA:.1f}%")
+        print(f"    Words    TTA={wrds_tta:.1f}%  no-TTA={wrds_noTTA:.1f}%")
+        print(f"    Combined TTA={combined_tta:.1f}%  no-TTA={combined_noTTA:.1f}%")
+
+    # Confidence summary across best modes
+    print(f"\n  Confidence Summary (baseline, all predictions):")
     for lvl in ["HIGH", "MEDIUM", "LOW"]:
         tot_c, tot_n = 0, 0
         for cat in ["numbers", "words"]:
-            if cat in results and lvl in results[cat]["confidence_buckets"]:
-                b = results[cat]["confidence_buckets"][lvl]
-                tot_c += b["correct"]
-                tot_n += b["total"]
+            if cat in all_results and "baseline" in all_results[cat]:
+                r = all_results[cat]["baseline"]
+                if lvl in r.get("confidence_buckets", {}):
+                    b = r["confidence_buckets"][lvl]
+                    tot_c += b["correct"]
+                    tot_n += b["total"]
         if tot_n > 0:
             print(f"    {lvl:>6s}: {tot_c}/{tot_n} = {100.0 * tot_c / tot_n:.0f}%")
 
     # Rejection analysis
-    all_total = sum(results[c]["total"] for c in results if c in ("numbers", "words"))
-    low_total = sum(results[c]["confidence_buckets"]["LOW"]["total"]
-                    for c in ("numbers", "words") if c in results and "confidence_buckets" in results[c])
-    accepted_correct = sum(
-        results[c]["confidence_buckets"]["HIGH"]["correct"] +
-        results[c]["confidence_buckets"]["MEDIUM"]["correct"]
-        for c in ("numbers", "words") if c in results and "confidence_buckets" in results[c]
-    )
-    accepted_total = sum(
-        results[c]["confidence_buckets"]["HIGH"]["total"] +
-        results[c]["confidence_buckets"]["MEDIUM"]["total"]
-        for c in ("numbers", "words") if c in results and "confidence_buckets" in results[c]
-    )
+    all_total = 0
+    low_total = 0
+    accepted_correct = 0
+    accepted_total = 0
+    for cat in ["numbers", "words"]:
+        if cat in all_results and "baseline" in all_results[cat]:
+            r = all_results[cat]["baseline"]
+            all_total += r["total"]
+            if "confidence_buckets" in r:
+                low_total += r["confidence_buckets"]["LOW"]["total"]
+                accepted_correct += (r["confidence_buckets"]["HIGH"]["correct"] +
+                                     r["confidence_buckets"]["MEDIUM"]["correct"])
+                accepted_total += (r["confidence_buckets"]["HIGH"]["total"] +
+                                   r["confidence_buckets"]["MEDIUM"]["total"])
+
     if accepted_total > 0:
         print(f"\n  If rejecting predictions below 0.4 confidence:")
         print(f"    Accepted: {accepted_total}/{all_total} "
@@ -1125,25 +1325,27 @@ def main():
               f"({100.0 * low_total / all_total:.0f}% of predictions)")
 
     # Previous version comparison
-    print(f"\n  Previous versions (for comparison):")
+    print(f"\n  Previous versions (for comparison, no-TTA):")
     print(f"    V19: Numbers 20.3% | Words 48.1% | Combined 34.2%")
     print(f"    V20: Numbers 20.3% | Words 40.7% | Combined 30.5%")
     print(f"    V21: Numbers 25.4% | Words 37.0% | Combined 31.2%")
     print(f"    V22: Numbers 33.9% | Words 45.7% | Combined 39.8%")
     print(f"    V25: Numbers 27.1% | Words 49.4% | Combined 38.3%")
+    print(f"    V26: Numbers 45.8% | Words 49.4% | Combined 47.6%")
+    print(f"    V27: Numbers 54.2% | Words 53.1% | Combined 53.7%  <-- previous best")
 
     # Save results
     results_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/results"
     os.makedirs(results_dir, exist_ok=True)
     ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_path = os.path.join(results_dir, f"v26_real_testers_{ts_str}.json")
+    results_path = os.path.join(results_dir, f"v29_real_testers_{ts_str}.json")
 
     def make_serializable(obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
-        if isinstance(obj, np.floating):
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
             return float(obj)
-        if isinstance(obj, np.integer):
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
             return int(obj)
         if isinstance(obj, dict):
             return {k: make_serializable(v) for k, v in obj.items()}
@@ -1151,12 +1353,14 @@ def main():
             return [make_serializable(v) for v in obj]
         if isinstance(obj, bool):
             return bool(obj)
+        if isinstance(obj, torch.Tensor):
+            return obj.tolist()
         return obj
 
     results_out = {
-        "version": "v26",
+        "version": "v29",
         "evaluation_type": "real_testers",
-        "training_data": "ksl-alpha (15 signers, signers 1-12 train, 13-15 test)",
+        "training_data": "ksl-alpha (12 signers train [1-12], 3 val [13-15])",
         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         "tta_enabled": True,
         "tta_augmentations": [
@@ -1171,15 +1375,21 @@ def main():
             "GCN: xyz(3)+velocity(3)+bone(3)=9ch | "
             "AUX: angles+fingertip_dists+hand_body_features "
             f"({NUM_ANGLE_FEATURES}+20+8={NUM_ANGLE_FEATURES + 20 + 8} features, "
-            "64-dim with temporal conv1d)"
+            "128-dim with temporal conv1d)"
         ),
-        "model": "KSLGraphNetV25 (ST-GCN + bigger aux MLP + signer-adversarial, no ArcFace)",
-        "v26_changes": [
-            "Training data: ksl-alpha dataset (15 signers instead of 5)",
-            "MediaPipe version matched between training and evaluation (both on Alpine)",
-            "Optional ksl-alpha test set evaluation (signers 13-15)",
+        "model": "KSLGraphNetV29 (8-layer ST-GCN + dilated TCN + 4-head attn + wider aux)",
+        "v29_changes": [
+            "8 GCN layers (ic->64->64->128->128->128->128->128->128), stride=2 at layers 1,3",
+            "Dilated TCN (k=3, d=1,2,4) replaces multi-kernel (3,5,7)",
+            "4 attention heads -> gcn_embed_dim=512",
+            "Wider aux branch: 128-dim output (not 64), aux_mlp 256->128",
+            "embed_dim=640 (512+128), classifier 640->128->nc",
+            "dropout=0.2 (not 0.3)",
+            "EMA model checkpoint evaluated alongside standard",
+            "AdaBN global mode: reset BN stats from test data",
         ],
-        "results": make_serializable(results),
+        "evaluation_modes": ["baseline", "adabn_global", "ema"],
+        "results": make_serializable(all_results),
     }
 
     with open(results_path, "w") as f:

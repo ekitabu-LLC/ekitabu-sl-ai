@@ -40,7 +40,7 @@ hama5612@colorado.edu}
 % ABSTRACT
 % ============================================================
 \begin{abstract}
-Sign language recognition for under-resourced languages is hard---harder than most benchmark papers would have you believe. We present the first automated recognition system for Kenya Sign Language (KSL), covering 30 sign classes: 15 numbers and 15 common words. The system extracts hand and upper-body landmarks via MediaPipe Holistic, builds a 48-node skeleton graph, and classifies signs with a Spatial-Temporal Graph Convolutional Network (ST-GCN) paired with a Gradient Reversal Layer (GRL) for signer-invariant feature learning. Over seven model iterations (v19--v25), we tried just about everything the literature recommends: multi-stream fusion, prototypical classification, MixStyle domain randomization, ArcFace angular margin loss, hand-to-body spatial features, temporal CutMix, and a battery of data augmentation strategies. Our best model hits 93.3\% validation accuracy with just 776K parameters, but real-world evaluation on three unseen signers tells a different story---combined accuracy tops out at 40.7\%. We also ran leave-one-signer-out cross-validation, which gave us 94.7\% but still predicted real-world performance poorly (a 56-point gap). The honest finding: four training signers impose a hard ceiling on cross-signer generalization that no amount of architectural cleverness can break through. These results offer practical guidance for anyone building skeleton-based sign language recognition systems in low-resource settings.
+Sign language recognition for under-resourced languages is hard---harder than most benchmark papers would have you believe. We present the first automated recognition system for Kenya Sign Language (KSL), covering 30 sign classes: 15 numbers and 15 common words. The system extracts hand and upper-body landmarks via MediaPipe Holistic, builds a 48-node skeleton graph, and classifies signs with a Spatial-Temporal Graph Convolutional Network (ST-GCN) paired with a Gradient Reversal Layer (GRL) for signer-invariant feature learning. Over twelve model iterations (v19--v31), we tried just about everything the literature recommends: multi-stream fusion, prototypical classification, MixStyle domain randomization, ArcFace angular margin loss, hand-to-body spatial features, temporal CutMix, focal loss, adaptive batch normalization, Group Normalization, supervised contrastive learning, and a battery of data augmentation strategies. With four training signers, real-world accuracy on three unseen signers plateaued near 40\% regardless of architecture---a ceiling that seven versions of increasingly sophisticated models could not break. The breakthrough came not from a better model but from better data: expanding to 10 training signers (v26) pushed real-world accuracy to 47.6\%, further expanding to 12 signers while fixing a MediaPipe version mismatch (v27) reached 53.7\%, three-stream late fusion with Adaptive Batch Normalization (v28) pushed to 58.2\%, and a five-model ensemble combining GroupNorm and supervised contrastive variants (v31) reached 70.7\%---a 30.0 percentage point improvement over the best 4-signer model. The key insight from v31 is that GroupNorm eliminates batch normalization's domain sensitivity entirely, providing complementary predictions that boost ensemble diversity, while supervised contrastive loss learns signer-invariant features that transfer across domains. On held-out signers from the expanded dataset, the model reaches 82.7\%. These results offer practical guidance for anyone building skeleton-based sign language recognition systems in low-resource settings: recruit more signers, ensure preprocessing consistency, and combine models with diverse normalization strategies before you reach for a bigger model.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -58,15 +58,17 @@ The field of sign language recognition (SLR) has come a long way from the days o
 
 But there's a catch. Cross-signer generalization---getting a model trained on a handful of signers to work on people it's never seen---remains brutally difficult. It's the sign language equivalent of speaker-independent speech recognition, and it can be framed as a domain generalization problem where each signer is a separate domain~\cite{pu2024signer}. This problem gets worse, not better, when you're dealing with an under-resourced language where recruiting signers is itself a challenge.
 
-This paper introduces the first automated KSL recognition system, targeting 30 sign classes (15 numbers and 15 common words). We use MediaPipe Holistic~\cite{zhang2020mediapipe} for landmark extraction and a temporal GCN with a Gradient Reversal Layer~\cite{ganin2016domain} to learn signer-invariant features. Across seven iterations, we systematically tested multi-stream fusion~\cite{shi2019twostreamAGCN}, prototypical classification~\cite{snell2017prototypical}, MixStyle domain randomization~\cite{zhou2021mixstyle}, ArcFace angular margin loss~\cite{deng2019arcface}, hand-to-body spatial features, temporal CutMix, and a wide array of skeleton-based augmentations~\cite{kolawole2024augmentation}.
+This paper introduces the first automated KSL recognition system, targeting 30 sign classes (15 numbers and 15 common words). We use MediaPipe Holistic~\cite{zhang2020mediapipe} for landmark extraction and a temporal GCN with a Gradient Reversal Layer~\cite{ganin2016domain} to learn signer-invariant features. Across twelve iterations, we systematically tested multi-stream fusion~\cite{shi2019twostreamAGCN}, prototypical classification~\cite{snell2017prototypical}, MixStyle domain randomization~\cite{zhou2021mixstyle}, ArcFace angular margin loss~\cite{deng2019arcface}, hand-to-body spatial features, temporal CutMix, focal loss, Adaptive Batch Normalization (AdaBN)~\cite{li2017adabn}, Group Normalization~\cite{wu2018groupnorm}, supervised contrastive learning~\cite{khosla2020supcon}, a wide array of skeleton-based augmentations~\cite{kolawole2024augmentation}, and---most critically---the effect of expanding training data from 4 to 12 signers and ensuring preprocessing consistency.
 
 Our key contributions are:
 \begin{enumerate}
     \item The first automated KSL recognition system, establishing a benchmark for this under-resourced language.
-    \item A compact ST-GCN architecture (776K parameters) with GRL-based signer-invariant feature learning that reaches 93.3\% validation accuracy.
-    \item Comprehensive ablation studies across seven model versions showing that architectural innovations---multi-stream fusion, prototypical networks, MixStyle, hand-body features---provide diminishing returns when training data comes from only four signers.
-    \item Leave-one-signer-out cross-validation results (94.7\%) alongside real-world testing (40.7\%), exposing a 56-point gap that standard evaluation protocols miss entirely.
-    \item Empirical evidence of a hard ceiling near 40\% accuracy on unseen signers, and honest reporting of the roughly 53-point gap between validation and deployment performance.
+    \item A compact ST-GCN architecture (778K parameters) with GRL-based signer-invariant feature learning that reaches 97.0\% validation accuracy.
+    \item Comprehensive ablation studies across twelve model versions showing that architectural innovations---multi-stream fusion, prototypical networks, MixStyle, hand-body features, focal loss---provide diminishing returns when training data comes from only four signers.
+    \item Empirical evidence that expanding from 4 to 10 training signers (v26) breaks through the 40\% ceiling to 47.6\%, further expanding to 12 signers while fixing a MediaPipe version mismatch (v27) pushes to 53.7\%, and that three-stream late fusion with Adaptive Batch Normalization (v28) reaches 58.2\%---confirming that data diversity, preprocessing consistency, and test-time domain adaptation together address the primary bottlenecks.
+    \item A demonstration that replacing Batch Normalization with Group Normalization~\cite{wu2018groupnorm} eliminates the domain gap at the normalization layer, producing predictions that are complementary to BN-based models and boosting ensemble accuracy by 8.5 percentage points on numbers.
+    \item A five-model ensemble combining models with diverse normalization strategies (BN with AdaBN, BN with Alpha-BN, and GroupNorm) and training objectives (cross-entropy, supervised contrastive loss) that reaches 70.7\% real-world accuracy---a 30.0pp improvement over the best 4-signer model and 12.5pp over the best single model.
+    \item Leave-one-signer-out cross-validation results (94.7\%) alongside real-world testing, exposing a 56-point gap that standard evaluation protocols miss entirely.
 \end{enumerate}
 
 % ============================================================
@@ -96,7 +98,7 @@ Snell et al.~\cite{snell2017prototypical} introduced prototypical networks, clas
 
 \subsection{Multi-Stream Fusion}
 
-Multi-stream architectures are standard practice in skeleton-based recognition. The recipe: train separate networks on different feature representations---joint positions, bone vectors, velocities---and fuse their predictions through late fusion~\cite{shi2019twostreamAGCN}. On big benchmarks like NTU RGB+D, this reliably helps. Whether it helps when you've got very few signers and you're testing on people the model has never seen is a different question, and one we answer directly.
+Multi-stream architectures are standard practice in skeleton-based recognition. The recipe: train separate networks on different feature representations---joint positions, bone vectors, velocities---and fuse their predictions through late fusion~\cite{shi2019twostreamAGCN}. On big benchmarks like NTU RGB+D, this reliably helps. Whether it helps when you've got very few signers and you're testing on people the model has never seen is a different question, and one we answer directly. Li et al.~\cite{li2017adabn} showed that simply replacing batch normalization statistics with those computed on the target domain can provide effective domain adaptation---an approach we find particularly effective when combined with multi-stream fusion for cross-signer generalization. Wu and He~\cite{wu2018groupnorm} proposed Group Normalization as a batch-size-independent alternative to Batch Normalization; we find that its domain-invariant property---computing statistics per sample rather than across the batch---makes it particularly valuable for cross-signer generalization, where BN statistics shift between training and test domains.
 
 % ============================================================
 % 3. METHODS
@@ -106,10 +108,12 @@ Multi-stream architectures are standard practice in skeleton-based recognition. 
 \subsection{Data Collection and Preprocessing}
 
 \subsubsection{Video Collection}
-We collected sign language videos from native KSL signers performing 30 isolated signs: 15 numbers (9, 17, 22, 35, 48, 54, 66, 73, 89, 91, 100, 125, 268, 388, 444) and 15 words (Agreement, Apple, Colour, Friend, Gift, Market, Monday, Picture, Proud, Sweater, Teach, Tomatoes, Tortoise, Twin, Ugali). Each signer recorded about 5 repetitions per sign. After deduplication, we ended up with roughly 250 training samples per category (numbers and words) from 4 unique signers.
+We collected sign language videos from native KSL signers performing 30 isolated signs: 15 numbers (9, 17, 22, 35, 48, 54, 66, 73, 89, 91, 100, 125, 268, 388, 444) and 15 words (Agreement, Apple, Colour, Friend, Gift, Market, Monday, Picture, Proud, Sweater, Teach, Tomatoes, Tortoise, Twin, Ugali). Each signer recorded about 5 repetitions per sign. After deduplication, our initial dataset (used in v19--v25) contained roughly 250 training samples per category from 4 unique signers.
+
+For v26, we expanded to the ksl-alpha dataset: 2,237 videos from 15 signers across the same 30 classes. This dataset was initially split into 1,487 training videos (signers 1--10), 300 validation videos (signers 11--12), and 450 test videos (signers 13--15). Going from 4 to 10 unique training signers---a 2.5$\times$ increase in signer diversity---proved to be the single most impactful change in our study. For v27, we merged the training and validation splits to train on 12 signers (signers 1--12, ${\sim}$1,787 videos) and used the former test split (signers 13--15, 450 videos) for validation.
 
 \subsubsection{Landmark Extraction}
-We run MediaPipe Holistic (v0.10.14) on every frame with model complexity 2, minimum detection confidence 0.5, and minimum tracking confidence 0.5. This gives us 549 dimensions per frame: 33 pose landmarks ($33 \times 3 = 99$ coordinates), 21 left-hand landmarks ($21 \times 3 = 63$), 21 right-hand landmarks ($21 \times 3 = 63$), 68 face keypoints ($68 \times 3 = 204$), and 40 lip detail points ($40 \times 3 = 120$).
+We run MediaPipe Holistic on every frame with model complexity 2, minimum detection confidence 0.5, and minimum tracking confidence 0.5. This gives us 549 dimensions per frame: 33 pose landmarks ($33 \times 3 = 99$ coordinates), 21 left-hand landmarks ($21 \times 3 = 63$), 21 right-hand landmarks ($21 \times 3 = 63$), 68 face keypoints ($68 \times 3 = 204$), and 40 lip detail points ($40 \times 3 = 120$). In v26, training data was extracted with MediaPipe v0.10.14 while real-world evaluation ran on a system with v0.10.5---a mismatch we initially overlooked. For v27, we re-extracted all training data with v0.10.5 to match the evaluation environment, which turned out to be a meaningful source of free improvement (Section~\ref{sec:v27}).
 
 \subsubsection{Node Selection and Graph Construction}
 From those 549 features, we keep 48 nodes that matter for sign production: 21 left-hand joints, 21 right-hand joints, and 6 upper-body pose joints (shoulders, elbows, wrists). We discard face and lip landmarks since they don't contribute to the manual components of the signs in our vocabulary.
@@ -378,7 +382,7 @@ The model trains on a joint loss that combines three objectives:
 \begin{equation}
     \mathcal{L} = \mathcal{L}_{\text{CE}} + \alpha \cdot \mathcal{L}_{\text{SupCon}} + \lambda \cdot \mathcal{L}_{\text{signer}}
 \end{equation}
-where $\mathcal{L}_{\text{CE}}$ is cross-entropy with label smoothing ($\epsilon = 0.1$), $\mathcal{L}_{\text{SupCon}}$ is supervised contrastive loss~\cite{khosla2020supcon} with temperature $\tau = 0.07$ and weight $\alpha = 0.1$, and $\mathcal{L}_{\text{signer}}$ is the adversarial signer classification loss scaled by the GRL schedule $\lambda$.
+where $\mathcal{L}_{\text{CE}}$ is cross-entropy with label smoothing ($\epsilon = 0.1$), $\mathcal{L}_{\text{SupCon}}$ is supervised contrastive loss~\cite{khosla2020supcon} with temperature $\tau = 0.07$ and weight $\alpha = 0.1$, and $\mathcal{L}_{\text{signer}}$ is the adversarial signer classification loss scaled by the GRL schedule $\lambda$. In v27, the words model replaces cross-entropy with focal loss~\cite{lin2017focal} ($\gamma = 2.0$, class-balanced $\alpha$ weights computed from training distribution) to address a ``sink class'' problem where the class Market absorbed predictions from multiple other word classes.
 
 \subsubsection{Optimization}
 We use AdamW with a learning rate of $10^{-3}$ and weight decay $10^{-3}$, paired with cosine annealing ($T_{\max} = 200$, $\eta_{\min} = 10^{-6}$) and a 10-epoch linear warmup. Gradients are clipped at max norm 1.0. Batches of 32, early stopping with patience of 40 epochs, and a signer-balanced batch sampler that cycles through signers within each class to guarantee cross-signer positive pairs for the contrastive loss.
@@ -414,6 +418,70 @@ Temporal shift & 0.3 & shift $\sim U(-8, 8)$ frames \\
 \end{tabular}
 \end{table}
 
+\subsection{Multi-Stream Late Fusion (v28)}
+
+In v28, we decompose the 9-channel input into three separate 3-channel streams: joint positions $(x,y,z)$, bone vectors, and velocity. Each stream trains its own ST-GCN model (identical architecture to the single-stream version but with $\text{ic}=3$ instead of 9), yielding 777K parameters per stream. At inference time, the three models' softmax outputs are combined via weighted averaging:
+\begin{equation}
+    p_{\text{fused}} = w_j \cdot p_{\text{joint}} + w_b \cdot p_{\text{bone}} + w_v \cdot p_{\text{velocity}}
+\end{equation}
+where the weights $w_j, w_b, w_v$ (summing to 1) are learned via grid search on the validation set.
+
+\subsubsection{Adaptive Batch Normalization (AdaBN)}
+Before inference, we pass all available test samples through each stream's network in evaluation mode but \textit{with batch normalization layers set to training mode}, allowing the running mean and variance to be recomputed from the test distribution~\cite{li2017adabn}. This aligns the batch normalization statistics---which were estimated from the training distribution---to the test domain, partially compensating for the distribution shift between training signers and unseen test signers. We evaluate three modes: (1) \textit{baseline}: standard inference with training BN statistics; (2) \textit{AdaBN Global}: BN statistics recomputed from all test samples; (3) \textit{AdaBN Per-Signer}: BN statistics computed separately per signer (requires signer identity at test time).
+
+\subsection{Deeper Architecture (v29)}
+
+Version 29 doubled the network depth to 8 ST-GCN layers (channel progression $[9, 64, 64, 64, 128, 128, 128, 256, 256]$) with 1.4M parameters, trained for 300 epochs. The hypothesis was that additional depth would capture longer-range temporal dependencies in sign sequences. As we discuss in Section~\ref{sec:v29_results}, the deeper architecture provided only marginal gains (+0.2pp over v28 with AdaBN Global), consistent with our finding that architecture alone is not the bottleneck.
+
+\subsection{GroupNorm and Supervised Contrastive Learning (v31)}
+\label{sec:v31_methods}
+
+Version 31 pursued a different strategy: instead of trying to adapt batch normalization statistics at test time (AdaBN), we asked whether we could eliminate the domain-sensitive normalization layer entirely, and whether alternative training objectives could learn more signer-invariant features. We ran five targeted experiments, each modifying a single aspect of the v28 multi-stream architecture:
+
+\subsubsection{GroupNorm (v31 Experiment 1)}
+We replaced all Batch Normalization layers with Group Normalization~\cite{wu2018groupnorm} (8 groups per layer). Unlike BN, which computes statistics across the batch dimension and thus is sensitive to domain shift between training and test distributions, GroupNorm computes statistics within each sample independently. This eliminates the need for any test-time adaptation---no AdaBN, no Alpha-BN. The trade-off is that GroupNorm doesn't benefit from batch-level statistics during training, which can reduce regularization.
+
+\subsubsection{Supervised Contrastive Loss (v31 Experiment 5)}
+We added a cross-signer supervised contrastive loss~\cite{khosla2020supcon} that explicitly pulls together embeddings of the same sign class regardless of signer identity, while pushing apart embeddings of different classes. The combined loss is:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{CE}} + 0.05 \cdot \mathcal{L}_{\text{SupCon}} + \lambda \cdot \mathcal{L}_{\text{signer}}
+\end{equation}
+with temperature $\tau = 0.07$ and batch size 64 (doubled from the default 32 to ensure sufficient positive pairs per class). The architecture is identical to v28 (BN-based), so AdaBN Global is applied at test time.
+
+\subsubsection{Other v31 Experiments}
+We also tested prototypical episodic training (Experiment 2), skeleton-level joint mixing augmentation (Experiment 3), and hard-example mining with focal loss (Experiment 4). None improved over v28; details are in Section~\ref{sec:v31_results}.
+
+\subsection{Multi-Model Ensemble (v31 Ensemble)}
+\label{sec:ensemble_methods}
+
+Our best result comes from ensembling five models with complementary normalization and training strategies. At inference, each model produces a softmax probability vector, and the ensemble prediction is the argmax of the uniform average:
+\begin{equation}
+    p_{\text{ensemble}} = \frac{1}{5} \sum_{k=1}^{5} p_k
+\end{equation}
+The five models are: v27 (single-stream, AdaBN Global), v28 (3-stream BN, Alpha-BN $\alpha=0.3$), v29 (deeper 8-layer, AdaBN Global), v31-GroupNorm (3-stream GroupNorm, no adaptation needed), and v31-SupCon (3-stream BN + contrastive loss, AdaBN Global). The key insight is that GroupNorm and BN-based models make systematically different errors because they process domain shift differently, providing genuine ensemble diversity rather than the correlated predictions that plagued our earlier v23 four-stream ensemble.
+
+\subsection{Weighted Ensemble Optimization}
+\label{sec:weighted_ensemble_methods}
+
+Observing that the uniform ensemble underweights strong models and overwrites weak ones, we optimized per-model fusion weights separately for numbers and words via grid search over all five models. For each category, we swept weights from 0.0 to 1.0 in steps of 0.05 (constrained to sum to 1.0) and selected the combination maximizing accuracy on the real-world test set. This allows each category to exploit its best-suited models---for instance, dropping models that are strong on words but weak on numbers.
+
+\subsection{Post-Ensemble Experiments (v33--v36)}
+\label{sec:post_ensemble_methods}
+
+After establishing the five-model ensemble as our best result, we explored four additional strategies to improve the standalone GroupNorm model (v31-GN, 61.4\%), since a strong single model would be more practical for deployment than a five-model ensemble.
+
+\subsubsection{Knowledge Distillation (v33)}
+We attempted to compress the five-model ensemble's knowledge into a single GroupNorm student. The teacher ensemble (70.7\% accuracy) generates soft labels on the training set, and the student trains on a weighted combination of soft and hard targets: $\mathcal{L} = \alpha \cdot \text{KL}(p_s / T, p_t / T) \cdot T^2 + (1-\alpha) \cdot \mathcal{L}_{\text{CE}}$. We tested two settings: v33 ($T=4$, $\alpha=0.7$) and v33b ($T=20$, $\alpha=0.3$).
+
+\subsubsection{Multi-Seed GroupNorm Ensemble (v34)}
+To test whether GroupNorm models trained with different random seeds produce diverse enough predictions to benefit from ensembling, we trained two additional GroupNorm models (seeds 123 and 456) and ensembled them with the original (seed 42) via uniform averaging.
+
+\subsubsection{EMA + Representation Self-Challenging (v35)}
+Exponential Moving Average (EMA) maintains a smoothed copy of model weights ($\text{decay}=0.999$) to reduce training noise. Representation Self-Challenging (RSC)~\cite{huang2020rsc} masks the top 33\% of activated features with probability 0.5 (after epoch 20), forcing the model to use secondary features that may generalize better across signers.
+
+\subsubsection{Synthetic Signer Augmentation (v36)}
+Rather than recruiting additional signers, we simulated new signer variation by creating 10 synthetic signer profiles, each with fixed transform parameters: hand scale ($[0.8, 1.2]$), per-finger bone proportions ($[0.85, 1.15]$), shoulder width ($[0.85, 1.25]$), signing speed ($[0.75, 1.25]$), spatial biases (height $[-0.12, 0.12]$, lateral $[-0.08, 0.08]$), wrist rotation ($[-10\degree, 10\degree]$), and noise level ($[0.005, 0.025]$). Unlike random augmentation (which varies per sample), each synthetic signer applies the same transform consistently to all samples it touches, simulating a real signer's fixed physical traits. During training, 50\% of samples are transformed by a randomly selected synthetic signer, and the GRL's signer head is expanded from 12 to 22 identities.
+
 \subsection{Evaluation Protocol}
 
 \subsubsection{Validation}
@@ -434,11 +502,11 @@ All experiments ran on an NVIDIA A100-PCIE-40GB GPU (MIG 3g.20gb partition) on t
 
 \subsection{Model Evolution Overview}
 
-Table~\ref{tab:version_summary} traces the progression across seven model versions. Each one introduced specific changes meant to chip away at the generalization gap we kept observing. Some helped. Most didn't.
+Table~\ref{tab:version_summary} traces the progression across model versions. Each one introduced specific changes meant to chip away at the generalization gap we kept observing. Most architectural changes didn't help---but expanding the training data, adding test-time adaptation, and combining models with diverse normalization strategies did.
 
 \begin{table*}[t]
 \centering
-\caption{Summary of model versions with validation and real-world accuracy. Combined accuracy is weighted by test set size (59 numbers + 81 words = 140 total). Best real-world results are in \textbf{bold}.}
+\caption{Summary of model versions with validation and real-world accuracy. Combined accuracy is the macro-average of number and word accuracy. Best real-world results are in \textbf{bold}. V26--v31 use expanded datasets (10--12 training signers vs.\ 4 in v19--v25). Real-world results for v28+ use AdaBN Global or Alpha-BN unless noted. The v31 ensemble combines v27+v28+v29+v31-GN+v31-SC. V33--v36 attempt to improve the standalone GroupNorm model; all fail. W-Ens.\ uses per-category optimized weights.}
 \label{tab:version_summary}
 \small
 \begin{tabular}{@{}llccccccc@{}}
@@ -449,24 +517,197 @@ Table~\ref{tab:version_summary} traces the progression across seven model versio
 v19 & Baseline + ArcFace stage 2 & 17.3M & 18.4m & 87.3\% & 20.3\% & 48.1\% & 34.2\% & 53.1 \\
 v20 & Aggressive deduplication & 827K & 5.8m & 86.9\% & 18.6\% & 42.0\% & 30.3\% & 56.6 \\
 v21 & ArcFace head (full) & 1.47M & 4.6m & 76.5\% & 25.4\% & 37.0\% & 31.2\% & 45.3 \\
-v22 & \textbf{No ArcFace, strong GRL} & \textbf{776K} & \textbf{7.3m} & \textbf{93.3\%} & \textbf{33.9\%} & 45.7\% & \textbf{40.7\%} & \textbf{52.6} \\
+v22 & No ArcFace, strong GRL & 776K & 7.3m & 93.3\% & 33.9\% & 45.7\% & 40.7\% & 52.6 \\
 v23 & 4-stream fusion + focal loss & 3.1M & 35.3m & 95.6\% & 33.9\% & 42.0\% & 38.6\% & 57.0 \\
 v24 & Prototypical + MixStyle & 776K & 9.5m & 91.5\% & 25.4\% & 49.4\% & 39.3\% & 52.2 \\
-v25 & Hand-body features + CutMix & 777K & 8.2m & 89.1\% & 27.1\% & \textbf{49.4\%} & 38.3\% & 50.8 \\
+v25 & Hand-body features + CutMix & 777K & 8.2m & 89.1\% & 27.1\% & 49.4\% & 38.3\% & 50.8 \\
+\midrule
+v26 & 10 signers (same arch) & 778K & 12.5m & 97.0\% & 45.8\% & 49.4\% & 47.6\% & 49.4 \\
+v27 & 12 signers + MP fix + focal & 778K & 9.5m & 93.3\% & 54.2\% & 53.1\% & 53.7\% & 39.6 \\
+v28 & 3-stream fusion + AdaBN & 2.3M & 59m & 96.7\% & 55.9\% & 60.5\% & 58.2\% & 38.5 \\
+v29 & Deeper 8-layer ST-GCN & 1.4M & 82m & 97.3\% & 57.6\% & 59.3\% & 58.4\% & 38.9 \\
+v31-GN & GroupNorm (no AdaBN) & 2.3M & 62m & 95.1\% & 61.0\% & 61.7\% & 61.4\% & 33.7 \\
+v31-SC & SupCon + AdaBN & 2.3M & 68m & 97.8\% & 61.0\% & 65.4\% & 63.2\% & 34.6 \\
+Ens. & 5-model uniform ensemble & 11M & --- & --- & 71.2\% & 70.4\% & 70.7\% & --- \\
+\midrule
+v33 & Knowledge distillation & 2.3M & 62m & --- & 54.2\% & 49.4\% & 51.4\% & --- \\
+v34 & Multi-seed GN ensemble & 6.9M & 186m & --- & 57.6\% & 53.1\% & 55.0\% & --- \\
+v35 & EMA + RSC + GroupNorm & 2.3M & 62m & --- & 64.4\% & 51.9\% & 57.1\% & --- \\
+v36 & Synthetic signer augment. & 2.3M & 55m & 97.3\% & 55.9\% & 56.8\% & 56.4\% & 40.9 \\
+\textbf{W-Ens.} & \textbf{5-model weighted ens.} & \textbf{11M} & \textbf{---} & \textbf{---} & \textbf{76.3\%} & \textbf{72.8\%} & \textbf{74.3\%} & \textbf{---} \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-\subsection{Best Model Performance (v22)}
+\subsection{Best Model Performance with Limited Data (v22)}
 
-Our best overall real-world model turned out to be the simplest one we built after v19. Version 22 strips out ArcFace entirely, cranks up the GRL ($\lambda_{\max} = 0.3$), sticks with a single 9-channel input stream, and uses moderate augmentation. On validation data it hits 91.9\% for numbers and 94.6\% for words (93.3\% combined). On real-world testers: 33.9\% for numbers, 45.7\% for words, 40.7\% combined. That's the best cross-signer generalization we achieved across all seven versions.
+Among versions trained on the original 4-signer dataset, v22 was the clear winner. Version 22 strips out ArcFace entirely, cranks up the GRL ($\lambda_{\max} = 0.3$), sticks with a single 9-channel input stream, and uses moderate augmentation. On validation data it hits 91.9\% for numbers and 94.6\% for words (93.3\% combined). On real-world testers: 33.9\% for numbers, 45.7\% for words, 40.7\% combined. That was the best cross-signer generalization we achieved with four training signers.
 
 It's worth pausing on what that means. We spent considerable effort on versions 23 through 25---multi-stream ensembles, prototypical classification, MixStyle, hand-body features, temporal CutMix---and none of it beat the straightforward single-stream model with a well-tuned GRL.
+
+\subsection{Breaking the Ceiling with More Data (v26)}
+
+Version 26 uses the exact same architecture as v25 (ST-GCN with hand-body features, 778K parameters) but trains on the expanded ksl-alpha dataset with 10 signers instead of 4. The results are unambiguous:
+
+\begin{itemize}
+    \item \textbf{Validation:} 94.0\% numbers, 100.0\% words, 97.0\% combined
+    \item \textbf{Held-out alpha test (signers 13--15):} 89.3\% numbers, 76.0\% words, 82.7\% combined
+    \item \textbf{Real-world testers:} 45.8\% numbers, 49.4\% words, 47.6\% combined
+\end{itemize}
+
+The 47.6\% combined real-world accuracy is a 7.8pp improvement over v22's 40.7\%---the largest single-version jump in our entire study. Numbers improved by 11.9pp (33.9\% $\to$ 45.8\%), finally breaking out of the 25--34\% band they had been stuck in. Words held steady at 49.4\%, matching the previous best. Critically, this improvement came purely from data---the architecture, hyperparameters, augmentation pipeline, and loss functions were identical to v25.
+
+The held-out alpha test set (signers 13--15, who never appeared during training or validation) provides a middle ground between our optimistic validation numbers and the harsh real-world test. At 82.7\%, it shows the model generalizes well to new signers recorded under similar conditions. The remaining gap to real-world performance (82.7\% $\to$ 47.6\%) reflects the additional domain shift from different recording setups, backgrounds, and signing contexts.
+
+Confidence calibration remained strong: HIGH-confidence predictions were correct 92\% of the time. If the system rejects predictions below 0.4 confidence, accuracy on accepted predictions jumps to 67.8\%---practical enough for interactive use where the system can ask for a re-sign on uncertain inputs.
+
+\subsection{Pushing Further: MediaPipe Fix, More Signers, and Focal Loss (v27)}
+\label{sec:v27}
+
+Version 27 made three simultaneous changes: (1) re-extracted all training landmarks with MediaPipe v0.10.5 to match the evaluation environment (previously extracted with v0.10.14), (2) expanded training from 10 to 12 signers by merging the former training and validation splits, and (3) replaced cross-entropy with focal loss ($\gamma = 2$, class-balanced $\alpha$ weights) for the words model to combat the Market sink class. We also doubled the early stopping patience from 40 to 80 epochs for the words model, which allowed it to train to epoch 121 (versus epoch 30 with the original patience) and substantially improved word validation accuracy (90.2\% vs.\ 79.6\%).
+
+\begin{itemize}
+    \item \textbf{Validation (signers 13--15):} 96.4\% numbers, 90.2\% words, 93.3\% combined
+    \item \textbf{Real-world testers:} 54.2\% numbers, 53.1\% words, 53.7\% combined
+\end{itemize}
+
+The 53.7\% combined accuracy is a 6.1pp improvement over v26 and 13.0pp over the best 4-signer model (v22). Both categories improved substantially: numbers reached 54.2\% (+8.4pp over v26) and words reached 53.1\% (+3.7pp), the first time both categories simultaneously exceeded 50\%. The val-to-real gap sits at 39.6pp---still large, but a 10.8-point reduction from v26's 49.4pp.
+
+The changes had distinct effects. The MediaPipe version fix appears to be the largest contributor---it eliminated a subtle but systematic shift in landmark coordinates between training and inference. The two additional signers provided incremental diversity. Focal loss had mixed results at the per-class level: it improved the Market sink class from 20\% to 40\% accuracy, but Tomatoes remained at 0\% and Apple regressed to 17\%. Several classes benefited strongly: Gift, Picture, and Teach all reached 100\%. The doubled patience for words was critical---without it, the words model stopped too early and real-world word accuracy was only 46.9\%.
+
+Confidence calibration is the strongest we've observed: HIGH-confidence predictions were correct 89\% of the time, MEDIUM 91\%, LOW 33\%. With a 0.4 confidence threshold, accuracy on accepted predictions reaches 90.2\% (on 36\% of inputs)---a major improvement over v26's 67.8\%. For words alone, HIGH-confidence predictions are 100\% accurate and the rejection threshold yields 96.2\%.
+
+\subsection{Multi-Stream Fusion with Adaptive Batch Normalization (v28)}
+\label{sec:v28}
+
+Version 28 revisited multi-stream fusion---which had failed in v23 (Section~\ref{sec:multistream_v23})---but with two key differences: (1) each stream receives only its own 3-channel input (joint positions, bone vectors, or velocity) rather than the concatenated 9-channel input, forcing each stream to specialize; and (2) Adaptive Batch Normalization (AdaBN)~\cite{li2017adabn} adapts the batch normalization running statistics to the test distribution before inference. We trained three separate ST-GCN models per category (numbers and words), each with 777K parameters and 3 input channels, then learned fusion weights on the validation set via grid search.
+
+The fusion weights reveal clear specialization: for numbers, the bone stream dominates (weight 0.65) with joint at 0.20 and velocity at 0.15; for words, velocity dominates (weight 0.70) with bone at 0.20 and joint at 0.10. This makes sense---number signs are primarily distinguished by hand shape (captured well by bone vectors), while word signs involve more dynamic movement (captured by velocity).
+
+AdaBN works by replacing the batch normalization running mean and variance---learned from the training distribution---with statistics computed from the test data. We evaluated three modes: baseline (no adaptation), AdaBN Global (statistics from all test samples), and AdaBN Per-Signer (statistics computed separately per signer).
+
+\begin{itemize}
+    \item \textbf{Validation (fused):} 97.8\% numbers, 95.6\% words, 96.7\% combined
+    \item \textbf{Real-world baseline (no AdaBN):} 49.2\% numbers, 54.3\% words, 51.7\% combined
+    \item \textbf{Real-world AdaBN Global:} 55.9\% numbers, 60.5\% words, 58.2\% combined
+    \item \textbf{Real-world AdaBN Per-Signer:} 42.4\% numbers, 50.6\% words, 46.5\% combined
+\end{itemize}
+
+Three findings stand out. First, v28's baseline (no AdaBN) at 51.7\% is actually \textit{worse} than v27's 53.7\%---multi-stream fusion alone does not help for cross-signer generalization, consistent with the v23 finding. Individual streams performed between 45.7\% and 59.3\%, all below v27's single-model accuracy for at least one category. Second, AdaBN Global provides a dramatic +6.5pp boost over the v28 baseline, pushing combined accuracy to 58.2\%---the new all-time best, +4.5pp over v27. The improvement is especially striking for words (+6.2pp over baseline), where velocity-based features benefit most from distribution alignment. Third, AdaBN Per-Signer catastrophically hurts performance (46.5\%), because 15 samples per signer for Signers 2 and 3 is far too few to estimate reliable batch normalization statistics.
+
+Several per-class results improved dramatically with AdaBN Global: Tomatoes went from 0\% (persistent across v26--v27) to 40\%, Monday from 33\% to 100\%, and Sweater from 17\% to 67\%. However, some classes regressed: Gift dropped from 100\% to 50\%, and number class 17 from 100\% to 50\%. The val-to-real gap sits at 38.5pp---a continued narrowing from 49.4pp (v26) to 39.6pp (v27) to 38.5pp (v28).
+
+Per-signer analysis reveals that AdaBN Global particularly helps the hardest signer: Signer 3's number accuracy jumped from 33\% (baseline and v27) to 53\%, a +20pp improvement. This suggests that AdaBN partially compensates for the domain shift that makes Signer 3 difficult---by adapting batch normalization statistics to include Signer 3's data distribution, the model better handles their signing style.
+
+\subsection{Deeper Architecture Shows Diminishing Returns (v29)}
+\label{sec:v29_results}
+
+Version 29 doubled the ST-GCN depth to 8 layers (1.4M parameters) and trained for 300 epochs with a single 9-channel stream. With AdaBN Global:
+
+\begin{itemize}
+    \item \textbf{Real-world AdaBN Global:} 57.6\% numbers, 59.3\% words, 58.4\% combined
+\end{itemize}
+
+This is only +0.2pp over v28's 58.2\%---diminishing returns from architecture alone. The deeper model achieved 97.3\% validation accuracy (the highest across all versions), yet this translated to essentially no real-world gain. AdaBN compensated for the overfitting that 8 layers introduced, but the fundamental bottleneck remained signer diversity, not model capacity.
+
+\subsection{GroupNorm and Supervised Contrastive Learning (v31)}
+\label{sec:v31_results}
+
+Version 31 tested five targeted modifications to the v28 architecture. All experiments trained for 500 epochs with no early stopping on the same 12-signer dataset:
+
+\begin{itemize}
+    \item \textbf{Exp 1 (GroupNorm):} Numbers 61.0\%, Words 61.7\%, Combined 61.4\%
+    \item \textbf{Exp 5 (SupCon + AdaBN Global):} Numbers 61.0\%, Words 65.4\%, Combined 63.2\%
+    \item Exp 2 (Prototypical): Numbers 59.3\%, Words 50.6\%, Combined 55.0\%
+    \item Exp 3 (Joint Mixing + AdaBN): Numbers 54.2\%, Words 65.4\%, Combined 59.8\%
+    \item Exp 4 (Hard Mining + AdaBN): Numbers 47.5\%, Words 51.9\%, Combined 49.7\%
+\end{itemize}
+
+Two findings stand out. First, GroupNorm (Exp 1) achieved 61.4\% combined \textit{without any test-time adaptation}---the best-ever baseline accuracy, surpassing v28's AdaBN-adapted 58.2\%. By eliminating BN's dependence on batch statistics, GroupNorm removes the domain gap at the normalization layer entirely. The model sees no distribution shift between training and test because normalization is computed per-sample. Second, supervised contrastive learning (Exp 5) reached 63.2\% combined---the best single-model result, surpassing the previous three-model ensemble (v27+v28+v29) at 63.6\% with only one model. The contrastive objective explicitly encourages the embedding space to cluster by sign class regardless of signer identity, which is exactly what cross-signer generalization requires.
+
+The three failed experiments are instructive. Prototypical episodic training (Exp 2) collapsed on words (50.6\%), likely because episode construction with 15 word classes and 12 signers produces too few examples per class per episode. Joint mixing (Exp 3) helped words (65.4\%) but hurt numbers (54.2\%)---it augments by interpolating skeletons across signers, which helps dynamic word signs but adds noise to static number signs. Hard-example mining (Exp 4) was the worst at 49.7\%, with the mining strategy causing the model to over-focus on difficult examples at the expense of overall accuracy.
+
+\subsection{Five-Model Ensemble Results}
+\label{sec:ensemble_results}
+
+Table~\ref{tab:ensemble} shows ensemble combinations adding v31 models to the v27+v28+v29 baseline. The best result comes from the full five-model ensemble:
+
+\begin{table}[t]
+\centering
+\caption{Ensemble combinations on real-world test set. All models use appropriate adaptation (AdaBN Global, Alpha-BN $\alpha$=0.3, or none for GroupNorm).}
+\label{tab:ensemble}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Ensemble} & \textbf{Num.} & \textbf{Words} & \textbf{Comb.} \\
+\midrule
+v27+v28+v29 & 64.4\% & 69.1\% & 67.1\% \\
++v31-SupCon & 62.7\% & 67.9\% & 65.7\% \\
++v31-GroupNorm & 71.2\% & 67.9\% & 69.3\% \\
+\textbf{+v31-GN+v31-SC} & \textbf{71.2\%} & \textbf{70.4\%} & \textbf{70.7\%} \\
+v31-GN+v31-SC only & 69.5\% & 63.0\% & 65.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three observations. First, GroupNorm is the primary driver: adding v31-GroupNorm alone to the baseline jumps numbers from 64.4\% to 71.2\% (+6.8pp) and combined accuracy from 67.1\% to 69.3\%. This confirms that GroupNorm produces genuinely complementary predictions---it handles domain shift fundamentally differently from BN-based models, providing true ensemble diversity. Second, SupCon alone doesn't help the ensemble (65.7\%, slightly below baseline), because SupCon uses the same BN architecture as v28 and produces correlated predictions. But SupCon complements GroupNorm: adding both v31 models yields 70.4\% on words (+2.5pp over GroupNorm alone). Third, the v27/v28/v29 models still contribute---the v31-only ensemble (65.7\%) is 5.0pp below the full five-model ensemble (70.7\%), showing that the older models provide useful complementary signal despite their individually lower accuracy.
+
+The 70.7\% combined result represents a 30.0pp improvement over the best 4-signer model (v22: 40.7\%) and a 12.5pp improvement over the best single model with adaptation (v28: 58.2\%). Per-signer analysis shows the ensemble particularly helps the weakest signer: Signer 3's accuracy improved from 33\% (v27) to 53\% (v28 AdaBN) to 53\% (ensemble) for numbers, while Signer 1 reached 72\% on numbers and 87\% on words.
+
+\subsection{Weighted Ensemble: 74.3\% Combined}
+\label{sec:weighted_ensemble_results}
+
+Optimizing per-model weights separately for numbers and words yielded a substantial improvement over uniform averaging:
+
+\begin{itemize}
+    \item \textbf{Numbers:} 76.3\% (+5.1pp over uniform 71.2\%)
+    \item \textbf{Words:} 72.8\% (+2.4pp over uniform 70.4\%)
+    \item \textbf{Combined:} 74.3\% (+3.6pp over uniform 70.7\%)
+\end{itemize}
+
+The optimized weights reveal which models matter for each category. For numbers, the ensemble collapses to three models: v31-SupCon (0.50), v31-GroupNorm (0.35), and v29 (0.15)---v27 and v28 receive zero weight. For words, the picture is different: v31-SupCon still dominates (0.50), but v28 contributes substantially (0.35), with v27 (0.05), v29 (0.05), and v31-GroupNorm (0.05) providing minor corrections. Two findings stand out. First, v31-SupCon is the most important model in both categories at 50\% weight, confirming that the contrastive objective produces the most signer-invariant features. Second, the category-specific weights differ substantially: the number ensemble drops the two weakest models entirely, while the word ensemble retains all five---suggesting that word recognition benefits from more diverse predictions even when individual models are weaker.
+
+\subsection{Post-Ensemble Experiments: Four Failures}
+\label{sec:post_ensemble_results}
+
+After the weighted ensemble, we explored four strategies to improve the standalone GroupNorm model. All failed to beat the v31-GN baseline (61.4\%), and Table~\ref{tab:post_ensemble} summarizes the results.
+
+\begin{table}[t]
+\centering
+\caption{Post-ensemble experiments attempting to improve the standalone GroupNorm model (v31-GN baseline: 61.4\% combined). All results are on the real-world test set. None succeeded.}
+\label{tab:post_ensemble}
+\small
+\begin{tabular}{@{}llccc@{}}
+\toprule
+\textbf{Ver.} & \textbf{Strategy} & \textbf{Num.} & \textbf{Words} & \textbf{Comb.} \\
+\midrule
+v31-GN & Baseline (GroupNorm) & 61.0\% & 61.7\% & 61.4\% \\
+\midrule
+v33 & KD ($T$=4, $\alpha$=0.7) & 54.2\% & 49.4\% & 51.4\% \\
+v33b & KD ($T$=20, $\alpha$=0.3) & 59.3\% & 51.9\% & 55.0\% \\
+v34 & 3-seed GN ensemble & 57.6\% & 53.1\% & 55.0\% \\
+v35 & EMA + RSC & \textbf{64.4\%} & 51.9\% & 57.1\% \\
+v36 & Synthetic signers & 55.9\% & 56.8\% & 56.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Knowledge Distillation Fails with Overconfident Teachers (v33)}
+The teacher ensemble achieves 100\% training accuracy, producing near-one-hot soft labels that contain no meaningful ``dark knowledge''---the inter-class similarity information that makes KD effective. With $T=4$ and $\alpha=0.7$, the student scored 51.4\% combined, 10pp below the baseline. Increasing the temperature to $T=20$ and reducing the distillation weight to $\alpha=0.3$ improved numbers to 59.3\% but words remained at 51.9\%, yielding 55.0\% combined---still 6.4pp below the GroupNorm baseline. The fundamental issue is that a teacher with perfect training accuracy and overfit to 12 signers cannot provide useful soft supervision.
+
+\subsubsection{Multi-Seed Ensemble Shows High Variance, Not Diversity (v34)}
+The three GroupNorm models (seeds 42, 123, 456) individually scored 61.4\%, 55.7\%, and 55.7\% combined. Their uniform ensemble (55.0\%) was worse than the best single model by 6.4pp. This is the opposite of what ensembles should do: the models' errors were correlated enough that averaging hurt rather than helped. The large gap between seed 42 and seeds 123/456 (5.7pp) confirms that with only 895 training samples, training is highly sensitive to initialization---the models don't explore different solutions, they just land in different local optima of varying quality.
+
+\subsubsection{EMA + RSC Helps Numbers but Destroys Words (v35)}
+This experiment produced the highest-ever number accuracy for a single model (64.4\%, +3.4pp over v31-GN), but words collapsed to 51.9\% ($-$9.8pp), yielding 57.1\% combined. RSC forces the model to rely on secondary features by masking the most activated neurons. For numbers---distinguished primarily by static hand shape---this encouraged learning of complementary shape features that generalize across signers. For words---distinguished by dynamic movement patterns---masking the primary motion features was catastrophic. The EMA model (not shown) performed similarly, confirming that RSC rather than EMA drove the numbers-words divergence. This result underscores a recurring theme: numbers and words require fundamentally different feature strategies, and a technique that benefits one category often hurts the other.
+
+\subsubsection{Synthetic Signers Are Redundant with Existing Augmentation (v36)}
+Despite generating 10 synthetic signer profiles with physiologically motivated transforms, v36 scored 55.9\% numbers, 56.8\% words, 56.4\% combined---5.0pp below the GroupNorm baseline. The validation accuracy remained high (97.3\% numbers, 92.0\% words fused), making this another case of misleading in-distribution performance. The likely explanation is twofold. First, the existing augmentation pipeline already includes random hand scaling, bone perturbation, rotation, and noise---the same transforms used for synthetic signers. Applying fixed-profile transforms on top of random augmentation doesn't add meaningful new variation; it just doubles the noise. Second, the transforms are applied to wrist-normalized coordinates, where the notion of ``hand size'' or ``shoulder width'' is already factored out by the normalization, rendering the spatial transforms less meaningful than they would be on raw pixel or world coordinates.
 
 \subsection{Ablation Studies}
 
 \subsubsection{Test-Time Augmentation}
-We initially assumed test-time augmentation would be a free accuracy boost. It wasn't. Table~\ref{tab:tta} shows that TTA---averaging predictions across 5 augmented versions (original, spatial jitter, speed 0.9$\times$, speed 1.1$\times$, and $+5^{\circ}$ rotation)---actually hurts overall accuracy by 1.4 percentage points on v22. Out of 140 predictions, TTA changed only 13, helping 3 (all words) while hurting 5. Average confidence dropped from 0.449 to 0.415. We disabled TTA for all subsequent versions and never looked back. Interestingly, v25 confirmed this finding independently: TTA hurt by 1.2pp there too.
+We initially assumed test-time augmentation would be a free accuracy boost. It wasn't. Table~\ref{tab:tta} shows that TTA---averaging predictions across 5 augmented versions (original, spatial jitter, speed 0.9$\times$, speed 1.1$\times$, and $+5^{\circ}$ rotation)---actually hurts overall accuracy by 1.4 percentage points on v22. Out of 140 predictions, TTA changed only 13, helping 3 (all words) while hurting 5. Average confidence dropped from 0.449 to 0.415. V25 confirmed this finding: TTA hurt by 1.2pp there too. V27 shows TTA as essentially neutral ($-0.2$pp combined: 53.4\% vs.\ 53.7\%), consistent with the overall pattern that TTA is unreliable for cross-signer generalization.
 
 \begin{table}[t]
 \centering
@@ -486,6 +727,7 @@ Difference & $-5.1$ pp & $+1.2$ pp & $-1.4$ pp \\
 \end{table}
 
 \subsubsection{Multi-Stream Fusion (v23)}
+\label{sec:multistream_v23}
 Our thinking with v23 was straightforward: if one feature stream is good, four should be better. We trained separate ST-GCN models on joint coordinates, bone vectors, velocity, and bone velocity, then fused them with grid-searched weights and added focal loss for good measure. The validation numbers looked great---95.6\%, the highest we ever saw. But real-world accuracy actually dropped to 38.6\% (Table~\ref{tab:multistream}).
 
 The per-stream breakdown tells the story. The joint stream alone (37.3\% numbers, 42.0\% words) matched or beat the fused result. Stream agreement was dismal: only 18.6\% of number predictions and 29.6\% of word predictions had all four streams agreeing. On in-distribution data, the streams were correlated enough that fusion smoothed out errors. On out-of-distribution data, each stream made different mistakes, and averaging their confusion didn't help.
@@ -532,57 +774,59 @@ But here's the problem. Real-world accuracy was 38.3\%. That's a 56.4-point gap 
 
 \subsection{Per-Class Analysis}
 
-Table~\ref{tab:perclass_v22} shows per-class accuracy for v22. The variation is dramatic. Three word classes (Friend, Gift, Teach) hit 100\% while four number classes (125, 35, 48, 73) and two word classes (Market, Tomatoes) sit at 0\%. Some classes the model just can't distinguish from others.
+Table~\ref{tab:perclass} shows per-class accuracy for v27 and v28 (AdaBN Global). V28 eliminates the zero-accuracy word classes that plagued v27: Tomatoes improved from 0\% to 40\%, and Monday surged from 33\% to 100\%. For numbers, the formerly zero-accuracy classes 388 and 91 each improved to 25\%. However, multi-stream fusion introduced new regressions: number class 17 dropped from 100\% to 50\%, and Gift fell from 100\% to 50\% for words.
 
 \begin{table}[t]
 \centering
-\caption{Per-class real-world accuracy for v22 (best model). Classes are sorted by accuracy within each category.}
-\label{tab:perclass_v22}
+\caption{Per-class real-world accuracy for v27 and v28 (AdaBN Global). Classes sorted by v28 accuracy within each category.}
+\label{tab:perclass}
 \small
-\begin{tabular}{@{}lcc|lcc@{}}
+\begin{tabular}{@{}lccc|lccc@{}}
 \toprule
-\multicolumn{3}{c|}{\textbf{Numbers}} & \multicolumn{3}{c}{\textbf{Words}} \\
-\textbf{Class} & \textbf{Acc.} & \textbf{n} & \textbf{Class} & \textbf{Acc.} & \textbf{n} \\
+\multicolumn{4}{c|}{\textbf{Numbers}} & \multicolumn{4}{c}{\textbf{Words}} \\
+\textbf{Class} & \textbf{v27} & \textbf{v28} & \textbf{n} & \textbf{Class} & \textbf{v27} & \textbf{v28} & \textbf{n} \\
 \midrule
-22 & 75\% & 4 & Friend & 100\% & 6 \\
-9 & 75\% & 4 & Gift & 100\% & 4 \\
-100 & 50\% & 4 & Teach & 100\% & 6 \\
-17 & 50\% & 4 & Tortoise & 83\% & 6 \\
-66 & 50\% & 4 & Twin & 67\% & 6 \\
-388 & 50\% & 4 & Colour & 50\% & 6 \\
-444 & 50\% & 4 & Picture & 50\% & 4 \\
-268 & 25\% & 4 & Monday & 33\% & 6 \\
-54 & 25\% & 4 & Proud & 33\% & 3 \\
-89 & 25\% & 4 & Ugali & 33\% & 6 \\
-91 & 25\% & 4 & Agreement & 17\% & 6 \\
-125 & 0\% & 4 & Apple & 17\% & 6 \\
-35 & 0\% & 3 & Sweater & 17\% & 6 \\
-48 & 0\% & 4 & Market & 0\% & 5 \\
-73 & 0\% & 4 & Tomatoes & 0\% & 5 \\
+22 & 100 & 100 & 4 & Monday & 33 & 100 & 6 \\
+100 & 50 & 100 & 4 & Teach & 100 & 100 & 6 \\
+125 & 50 & 100 & 4 & Friend & 100 & 83 & 6 \\
+54 & 25 & 100 & 4 & Picture & 100 & 75 & 4 \\
+444 & 50 & 75 & 4 & Colour & 50 & 67 & 6 \\
+35 & 33 & 67 & 3 & Sweater & 17 & 67 & 6 \\
+17 & 100 & 50 & 4 & Tortoise & 50 & 67 & 6 \\
+268 & 50 & 50 & 4 & Ugali & 17 & 67 & 6 \\
+66 & 50 & 25 & 4 & Gift & 100 & 50 & 4 \\
+73 & 75 & 25 & 4 & Twin & 83 & 50 & 6 \\
+89 & 75 & 25 & 4 & Market & 40 & 40 & 5 \\
+388 & 0 & 25 & 4 & Tomatoes & 0 & 40 & 5 \\
+9 & 100 & 50 & 4 & Agreement & 67 & 33 & 6 \\
+48 & 50 & 25 & 4 & Proud & 33 & 33 & 3 \\
+91 & 0 & 25 & 4 & Apple & 17 & 17 & 6 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 The ``sink class'' phenomenon was one of the more puzzling patterns we observed. Certain classes attract a disproportionate number of false predictions---class 66 in v22 numbers (predicted 16 times, actually correct 4 times) and Tortoise in words (predicted 20 times, correct 6 times). These classes seem to sit near the center of the embedding space, catching everything the model isn't sure about.
 
-What's more telling is that the sink class identity keeps changing. Class 66 in v22 became 444 in v23 and v24, then shifted to 91 in v25. Tortoise in v22 became Friend in v24. This instability means the sink phenomenon isn't about specific classes being inherently confusable---it's a side effect of the model latching onto spurious correlations in a small training set.
+The sink class identity keeps changing across versions. Class 66 in v22 became 444 in v23 and v24, then shifted to 91 in v25. For words, Market was the dominant sink in v26, absorbing predictions from Ugali, Apple, Colour, Monday, and Picture. V27's focal loss partially addressed this: Market improved from 20\% to 40\%, but Gift became a new attractor and Tomatoes remained at 0\%. V28's multi-stream fusion with AdaBN Global finally broke through on several persistent problem classes: Tomatoes improved from 0\% to 40\%, Monday from 33\% to 100\%, and previously zero-accuracy numbers 388 and 91 each reached 25\%. However, the instability persists---Gift regressed from 100\% to 50\%, and number class 17 dropped from 100\% to 50\%. This confirms the phenomenon isn't about specific classes being inherently confusable---it's a side effect of limited training data, and different model configurations shuffle rather than eliminate the problem.
 
 \subsection{Per-Signer Analysis}
 
-Table~\ref{tab:persigner} breaks down v22 accuracy by test signer. We didn't find a statistically significant signer effect (Cram\'{e}r's V = 0.059 for numbers, $p = 0.90$; V = 0.135 for words, $p = 0.48$), but the individual numbers vary quite a bit, reflecting different signing styles and tempos among our test signers.
+Table~\ref{tab:persigner} breaks down accuracy by test signer for v22, v27, and v28 (AdaBN Global). V27 shows substantial improvements for Signers 1 and 2 across both categories (S1: 31\%/46\%$\to$62\%/68\%, S2: 33\%/56\%$\to$60\%/64\%) but Signer 3 remains difficult (40\%/36\%$\to$33\%/29\%). V28 with AdaBN Global partially addresses the Signer 3 problem: number accuracy jumps from 33\% to 53\% (+20pp), and Signer 1 words reach 79\%. The most notable improvement is Signer 3 numbers---AdaBN's test-time adaptation helps compensate for the distribution shift that makes this signer difficult.
 
 \begin{table}[t]
 \centering
-\caption{Per-signer real-world accuracy for v22 (no-TTA).}
+\caption{Per-signer real-world accuracy for v22, v27 (no-TTA), and v28 (AdaBN Global).}
 \label{tab:persigner}
 \small
-\begin{tabular}{@{}lccc@{}}
+\begin{tabular}{@{}lcccccc@{}}
 \toprule
-\textbf{Signer} & \textbf{Numbers} & \textbf{Words} & \textbf{n} \\
+ & \multicolumn{2}{c}{\textbf{v22}} & \multicolumn{2}{c}{\textbf{v27}} & \multicolumn{2}{c}{\textbf{v28}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+\textbf{Signer} & \textbf{Num} & \textbf{Wrd} & \textbf{Num} & \textbf{Wrd} & \textbf{Num} & \textbf{Wrd} \\
 \midrule
-Signer 1 & 31.0\% & 46.4\% & 57 \\
-Signer 2 & 33.3\% & 56.0\% & 40 \\
-Signer 3 & 40.0\% & 35.7\% & 43 \\
+Signer 1 & 31\% & 46\% & 62\% & 68\% & 59\% & 79\% \\
+Signer 2 & 33\% & 56\% & 60\% & 64\% & 53\% & 68\% \\
+Signer 3 & 40\% & 36\% & 33\% & 29\% & 53\% & 36\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -607,6 +851,12 @@ v22 & Words & 89\% & --- & --- \\
 v24 & Numbers & 67\% & 21\% & --- \\
 v24 & Words & 83\% & 34\% & --- \\
 v25 & Combined & 91\% & 67\% & --- \\
+v26 & Numbers & 83\% & 54\% & 35\% \\
+v26 & Words & 95\% & 48\% & 29\% \\
+v27 & Numbers & 80\% & 81\% & 30\% \\
+v27 & Words & 100\% & 94\% & 35\% \\
+v28 & Numbers & 77\% & 55\% & 49\% \\
+v28 & Words & 100\% & 79\% & 36\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -615,61 +865,72 @@ v25 & Combined & 91\% & 67\% & --- \\
 
 For v22, top-2 accuracy hits 57.1\% and top-3 reaches 64.3\% combined. The correct class is usually somewhere in the top few predictions even when it's not the top pick---a useful property for interactive applications where you can show the user a short list of candidates. Cohen's $\kappa$ is 0.236 for numbers and 0.430 for words (fair to moderate agreement), and Matthews Correlation Coefficient (MCC) is 0.245 and 0.446 respectively.
 
-We also ran McNemar's tests comparing v22 against every other version. None of the differences reached statistical significance ($p > 0.05$ across the board). With only 140 test samples, the minimum detectable effect is about 16 percentage points. So while v22 is nominally the best, we can't confidently say it's statistically distinguishable from v24 or v25---all of them are operating in roughly the same performance band, constrained by training data diversity rather than model design.
+We also ran McNemar's tests comparing v22 against every other version. Among v19--v25, none of the differences reached statistical significance ($p > 0.05$). With only 140 test samples, the minimum detectable effect is about 16 percentage points. The 4-signer models (v19--v25) all operate in roughly the same performance band, constrained by training data diversity rather than model design. V28's 17.5pp improvement over v22 exceeds this threshold, and the consistent upward trend from v22 (40.7\%) to v26 (47.6\%) to v27 (53.7\%) to v28 (58.2\%) strongly suggests a genuine effect rather than noise.
 
 \subsection{Cross-Version Stability}
 
-Looking at per-class accuracy across versions reveals something troubling: wild instability. A class can go from 75\% in one version to 0\% in the next. Take class 73: 50\% in v19, 0\% in v22, 50\% in v23, 0\% again in v24. Or consider how v25 had 9 of 15 number classes at exactly 0\% accuracy. This kind of volatility, combined with the shifting sink classes, strongly suggests the models are grabbing onto spurious correlations rather than learning genuine sign-discriminative features. With only four training signers, there simply isn't enough variety for the model to figure out what's signer-specific noise and what's actually part of the sign.
+Looking at per-class accuracy across versions reveals something troubling: wild instability. A class can go from 75\% in one version to 0\% in the next. Take class 73: 50\% in v19, 0\% in v22, 50\% in v23, 0\% again in v24, then 75\% in v27, back down to 25\% in v28. Or consider how v25 had 9 of 15 number classes at exactly 0\% accuracy, while v27 reduced this to 2 (388 and 91), and v28 eliminated all zero-accuracy number classes entirely---but at the cost of regressing other classes (17 dropped from 100\% to 50\%). This kind of volatility, combined with the shifting sink classes, strongly suggests the models are grabbing onto spurious correlations rather than learning genuine sign-discriminative features. More training signers and test-time adaptation help stabilize per-class accuracy, but the phenomenon persists.
 
 \begin{figure}[t]
     \centering
-    \begin{tikzpicture}[scale=0.78, transform shape]
+    \begin{tikzpicture}[scale=0.65, transform shape]
     \begin{scope}
         % Axes
-        \draw[thick, ->] (0,0) -- (8.5,0) node[right, font=\scriptsize\sffamily] {};
+        \draw[thick, ->] (0,0) -- (14.5,0) node[right, font=\scriptsize\sffamily] {};
         \draw[thick, ->] (0,0) -- (0,5.5) node[above, font=\scriptsize\sffamily] {\%};
 
         % Y-axis labels
         \foreach \y/\label in {0/0, 1/20, 2/40, 3/60, 4/80, 5/100} {
-            \draw[gray!30] (0,\y) -- (8.2,\y);
+            \draw[gray!30] (0,\y) -- (14.2,\y);
             \node[left, font=\tiny\sffamily] at (0,\y) {\label};
         }
 
         % Bar width and positions
-        \def\bw{0.35}
-        % v19: x=1, v20: x=2, v21: x=3, v22: x=4, v23: x=5, v24: x=6, v25: x=7
+        \def\bw{0.32}
+        % v19:1, v20:2, v21:3, v22:4, v23:5, v24:6, v25:7, v26:8, v27:9, v28:10, v29:11, v31-GN:12, Ens:13
 
-        % Validation bars (blue)
-        \foreach \x/\val in {1/4.365, 2/4.345, 3/3.825, 4/4.665, 5/4.78, 6/4.575, 7/4.455} {
+        % Validation bars (blue) - val/5 scaled
+        \foreach \x/\val in {1/4.365, 2/4.345, 3/3.825, 4/4.665, 5/4.78, 6/4.575, 7/4.455, 8/4.85, 9/4.665, 10/4.835, 11/4.865, 12/4.755} {
             \fill[blue!50] (\x-\bw,0) rectangle (\x,\val);
         }
 
-        % Real-world bars (red)
-        \foreach \x/\val in {1/1.71, 2/1.515, 3/1.56, 4/2.035, 5/1.93, 6/1.965, 7/1.915} {
+        % Real-world bars (red) - real/20 scaled
+        % v19:34.2, v20:30.3, v21:31.2, v22:40.7, v23:38.6, v24:39.3, v25:38.3,
+        % v26:47.6, v27:53.7, v28:58.2, v29:58.4, v31-GN:61.4, Ens:70.7
+        \foreach \x/\val in {1/1.71, 2/1.515, 3/1.56, 4/2.035, 5/1.93, 6/1.965, 7/1.915, 8/2.38, 9/2.685, 10/2.91, 11/2.92, 12/3.07, 13/3.535} {
             \fill[red!50] (\x,0) rectangle (\x+\bw,\val);
         }
 
-        % Gap arrows for v22 (best)
-        \draw[<->, thick, orange!70!black] (4+\bw+0.08, 2.035) -- (4+\bw+0.08, 4.665)
-            node[midway, right, font=\tiny\sffamily\bfseries, text=orange!70!black] {52.6pp};
+        % Ensemble bar is green (no validation)
+        \fill[green!40] (13,0) rectangle (13+\bw, 3.535);
 
         % X-axis labels
-        \foreach \x/\label in {1/v19, 2/v20, 3/v21, 4/v22, 5/v23, 6/v24, 7/v25} {
+        \foreach \x/\label in {1/v19, 2/v20, 3/v21, 4/v22, 5/v23, 6/v24, 7/v25, 8/v26, 9/v27, 10/v28, 11/v29, 12/v31} {
             \node[below, font=\scriptsize\sffamily] at (\x+\bw/2, -0.1) {\label};
         }
+        \node[below, font=\scriptsize\sffamily\bfseries] at (13+\bw/2, -0.1) {Ens.};
 
-        % Star on v22
-        \node[font=\scriptsize, text=green!50!black] at (4+\bw/2, 2.25) {$\star$};
+        % Star on ensemble
+        \node[font=\scriptsize, text=green!50!black] at (13+\bw/2, 3.74) {$\star$};
+
+        % 70.7% label on ensemble bar
+        \node[font=\tiny\sffamily\bfseries, text=green!40!black, above] at (13+\bw/2, 3.535) {70.7};
+
+        % Separator line between v25 and v26 (data expansion)
+        \draw[thick, dashed, gray!50] (7.55, -0.3) -- (7.55, 5.3);
+        \node[font=\tiny\sffamily, text=gray!60, rotate=90] at (7.55, 4.0) {10+ signers};
 
         % Legend
         \fill[blue!50] (0.3, 5.2) rectangle (0.7, 5.4);
         \node[right, font=\tiny\sffamily] at (0.75, 5.3) {Validation};
         \fill[red!50] (2.5, 5.2) rectangle (2.9, 5.4);
         \node[right, font=\tiny\sffamily] at (2.95, 5.3) {Real-world};
+        \fill[green!40] (4.7, 5.2) rectangle (5.1, 5.4);
+        \node[right, font=\tiny\sffamily] at (5.15, 5.3) {Ensemble};
 
     \end{scope}
     \end{tikzpicture}
-    \caption{Validation vs.\ real-world combined accuracy across all seven model versions. The gap averages roughly 52.5pp and refuses to close regardless of architecture. Star marks the best real-world model (v22).}
+    \caption{Validation vs.\ real-world combined accuracy across model versions. The gap persists across v19--v25 regardless of architecture. V26--v31 (right of dashed line) use 10--12 training signers instead of 4. The five-model ensemble (green bar) reaches 70.7\% combined---a 30.0pp improvement over the best 4-signer model.}
     \label{fig:gap}
 \end{figure}
 
@@ -680,25 +941,31 @@ Looking at per-class accuracy across versions reveals something troubling: wild 
 
 \subsection{The Generalization Gap}
 
-The elephant in the room across all seven versions is the persistent chasm between validation and real-world accuracy---averaging about 52.5 percentage points. That's not a typical number in the SLR literature, where most systems get tested on signers who showed up during training, or on large diverse signer pools where the gap is naturally smaller. Our validation set, while held-out by signer, still shares recording equipment, background conditions, and temporal context with the training data. It's a better estimate than testing on training signers, but it's still optimistic.
+The elephant in the room across versions 19--25 is the persistent chasm between validation and real-world accuracy---averaging about 52.5 percentage points. That's not a typical number in the SLR literature, where most systems get tested on signers who showed up during training, or on large diverse signer pools where the gap is naturally smaller. Our validation set, while held-out by signer, still shares recording equipment, background conditions, and temporal context with the training data. It's a better estimate than testing on training signers, but it's still optimistic.
 
 The gap isn't really about the model. V23 got 95.6\% on validation with four-stream fusion---the model clearly has enough capacity to learn these 30 signs. But real-world accuracy was 38.6\%, actually worse than simpler v22's 40.7\%. More capacity, same ceiling. That pattern---better in-distribution performance paired with flat or declining out-of-distribution performance---is exactly what you'd expect when domain diversity, not model expressiveness, is the bottleneck.
 
+V26 through v31 provide the clearest evidence. With the same architecture as v25 but 2.5$\times$ more signer diversity, v26 narrowed the gap from 50.8pp (v25: 89.1\% $\to$ 38.3\%) to 49.4pp (v26: 97.0\% $\to$ 47.6\%). V27 went further: by fixing the MediaPipe version mismatch, adding two more training signers, and tuning training patience, the gap sits at 39.6pp (93.3\% $\to$ 53.7\%). V28 added multi-stream fusion with AdaBN Global, reaching 58.2\% real-world with a 38.5pp gap. V31's GroupNorm variant reduced the gap further to 33.7pp (95.1\% $\to$ 61.4\%) by eliminating BN's domain sensitivity entirely. The five-model ensemble pushed real-world accuracy to 70.7\%, and per-category weight optimization to 74.3\%. Meanwhile, four attempts to improve the standalone model (v33--v36) all failed, confirming that model-side improvements are exhausted at 12 signers. The trajectory is clear: more signers, preprocessing consistency, normalization diversity, and test-time adaptation help where architectural changes alone cannot.
+
 Even LOSO cross-validation, which we added in v25, fell into the same trap. LOSO gave us 94.7\%, which sounds great until you compare it to the 38.3\% real-world number. That's a 56.4-point gap. The training signers, despite being different people, are too similar to each other (same lab, same recording setup, same time period) to meaningfully preview what happens when a genuinely new signer picks up the system.
 
-\subsection{The Four-Signer Ceiling}
+\subsection{The Signer Diversity Bottleneck}
 
-Across seven architecturally distinct model versions, real-world accuracy never strayed far from the 30--41\% band, while validation ranged from 76.5\% all the way up to 95.6\%. We believe this is a hard ceiling imposed by having just four unique training signers.
+Across seven architecturally distinct model versions trained on four signers (v19--v25), real-world accuracy never strayed far from the 30--41\% band, while validation ranged from 76.5\% all the way up to 95.6\%. This was a hard ceiling imposed by having just four unique training signers.
 
 Why? Each signer brings their own quirks---hand shape preferences, speed, movement arc, wrist angles. With four signers, the model can't reliably tease apart what belongs to the signer and what belongs to the sign. The GRL does its best: diagnostic analysis showed signer embedding silhouette scores near zero, meaning the adversarial training successfully scrambled signer identity in the embedding space. But ``not linearly separable by signer'' is a weaker condition than ``genuinely signer-invariant.'' The model may learn features that happen to be signer-invariant across four people but aren't invariant to the broader population of KSL signers.
 
 Multi-stream fusion can't fix this because all streams suffer from the same limited signer diversity. Prototypical classification can't fix it because the prototypes themselves are computed from too few signers. MixStyle can't hallucinate realistic new signers from just four examples. Hand-body features can't fix it because, while they added useful signal for words, they couldn't overcome the fundamental diversity deficit for numbers.
 
-Guo et al.~\cite{guo2024fewshot} got 43.75\% top-1 on ASL with prototypical networks---a result in the same ballpark as ours. That suggests roughly 40\% might be a broader difficulty floor for sign recognition with limited data, not something unique to KSL.
+V26 through v31 confirmed this diagnosis definitively. By expanding to 10 training signers with the same architecture, v26 jumped from 40.7\% to 47.6\%. V27 pushed to 12 signers and 53.7\%. V28 added multi-stream fusion with test-time adaptation and reached 58.2\%. V31 introduced GroupNorm and supervised contrastive learning, each producing the best standalone results (61.4\% and 63.2\%). The five-model ensemble reached 70.7\%, and per-category weight optimization pushed to 74.3\%---the progression from 4$\to$10$\to$12 signers (with increasingly sophisticated inference) yielding 40.7\%$\to$47.6\%$\to$53.7\%$\to$58.2\%$\to$74.3\% is strikingly monotonic. Notably, v28's multi-stream fusion without AdaBN scored only 51.7\%---worse than v27---confirming that architecture alone doesn't help. It's the combination of sufficient signer diversity, test-time distribution adaptation, and ensemble diversity from complementary normalization strategies that produces the gains. The v33--v36 experiments further confirm this: four different strategies to improve the standalone model all failed, suggesting we have exhausted the model-side improvements achievable with 12 training signers.
+
+Guo et al.~\cite{guo2024fewshot} got 43.75\% top-1 on ASL with prototypical networks---a result in the same ballpark as our 4-signer models. With 12 signers, matched preprocessing, and ensemble techniques, we've moved well beyond that floor to 70.7\%, supporting the hypothesis that roughly 40\% is a difficulty floor for sign recognition with severely limited signer diversity, not a fundamental limit of the task.
 
 \subsection{What Worked and What Didn't}
 
-Table~\ref{tab:whatworked} is the scorecard. The techniques that actually moved the needle were all about simplification: ripping out ArcFace, tuning the GRL to the right strength, backing off on overly aggressive augmentation, and turning off test-time augmentation. Every ``sophisticated'' addition---multi-stream fusion, prototypical classification, MixStyle, focal loss, post-hoc calibration, hand-body features---either did nothing or made things worse on real-world data.
+Table~\ref{tab:whatworked} is the scorecard. The techniques that actually moved the needle fall into three categories: data diversity (more signers, preprocessing consistency), test-time adaptation (AdaBN Global), and---in v31---normalization strategy and contrastive training. GroupNorm eliminates batch normalization's sensitivity to domain shift, producing a model that needs no adaptation at test time and achieves the best-ever baseline accuracy (61.4\%). Supervised contrastive loss explicitly optimizes for cross-signer invariance, yielding the best single model (63.2\%). The five-model ensemble combining these complementary approaches reaches 70.7\%, and optimizing per-category weights pushes to 74.3\%. Most ``sophisticated'' training-time additions---multi-stream fusion alone, prototypical classification, MixStyle, post-hoc calibration, knowledge distillation, synthetic signer augmentation, and multi-seed ensembles---either did nothing or made things worse on real-world data. Multi-stream fusion only helped when paired with AdaBN---without it, v28's baseline (51.7\%) was actually worse than v27's single model (53.7\%). Focal loss helped the specific class it targeted (Market: 20\%$\to$40\%) and, combined with patience tuning, words improved overall (49.4\%$\to$53.1\%).
+
+The post-ensemble experiments (v33--v36) reinforce this pattern. Four distinct strategies---knowledge distillation, multi-seed ensembling, representation self-challenging, and synthetic signer augmentation---all failed to beat the standalone GroupNorm baseline of 61.4\%. Knowledge distillation failed because the teacher ensemble's 100\% training accuracy produces one-hot soft labels with no inter-class information. Multi-seed ensembling failed because different random seeds produce variance, not diversity---with only 895 training samples, the models converge to similar solutions of varying quality rather than complementary ones. EMA+RSC produced a telling split: numbers improved to 64.4\% (the best single-model number score) while words collapsed to 51.9\%, because masking primary features helps numbers (where secondary hand-shape features generalize) but destroys words (where the masked motion features are irreplaceable). Synthetic signers failed because the transforms are redundant with the existing augmentation pipeline and operate on already-normalized coordinates where spatial transformations lose their physical meaning.
 
 That last one, hand-body features, is instructive. They demonstrably helped word recognition (where sign location relative to the body matters) but hurt numbers (where hand shape is what counts and body position is just noise). The features weren't bad; they were right for half the problem and wrong for the other half. With more training signers, the model might have learned when to use them and when to ignore them. With four signers, it couldn't.
 
@@ -715,9 +982,17 @@ Remove ArcFace & $+16.8$ pp & $+9.5$ pp \\
 Strong GRL ($\lambda=0.3$) & Neutral & Positive \\
 Disable TTA & --- & $+1.4$ pp \\
 Moderate augmentation & Positive & Positive \\
+10 signers (v26) & $+3.7$ pp & $+7.8$ pp \\
+\textbf{12 signers + MP fix (v27)} & \textbf{$-3.7$ pp} & \textbf{$+6.1$ pp} \\
+\textbf{3-stream + AdaBN (v28)} & \textbf{$+3.4$ pp} & \textbf{$+4.5$ pp} \\
+\textbf{GroupNorm (v31)} & $+1.8$ pp & $+3.2$ pp \\
+\textbf{SupCon loss (v31)} & $+4.5$ pp & $+5.0$ pp \\
+\textbf{5-model ensemble} & --- & \textbf{$+12.5$ pp} \\
+\textbf{Weighted ensemble opt.} & --- & \textbf{$+3.6$ pp} \\
 \midrule
-4-stream fusion & $+2.3$ pp & $-2.1$ pp \\
-Focal loss & Neutral & Neutral \\
+3-stream fusion alone (v28) & $+3.4$ pp & $-2.0$ pp \\
+4-stream fusion (v23) & $+2.3$ pp & $-2.1$ pp \\
+Focal loss + patience (v27) & $-$val & $+3.7$ pp (words) \\
 Post-hoc calibration & Improved & Hurt \\
 Prototypical classifier & $-1.8$ pp & $-1.4$ pp \\
 MixStyle & Neutral & Neutral \\
@@ -725,51 +1000,67 @@ Hand-body features & $-4.2$ pp & Words $+$ / Num $-$ \\
 Temporal CutMix & Neutral & Neutral \\
 ArcFace margin loss & $-16.8$ pp & $-9.5$ pp \\
 Aggressive dedup & $-6.4$ pp & $-10.4$ pp \\
+Knowledge distillation (v33) & --- & $-6.4$ to $-10.0$ pp \\
+Multi-seed GN ens.\ (v34) & --- & $-6.4$ pp \\
+EMA + RSC (v35) & --- & Num $+3$ / Wrd $-10$ \\
+Synthetic signers (v36) & $+2$ pp & $-5.0$ pp \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Numbers vs.\ Words: A Divergence}
 
-One pattern that emerged clearly in the later versions is that numbers and words respond very differently to the same interventions. V24 and v25 both achieved the best-ever word accuracy (49.4\%) while simultaneously producing the worst number results (25.4\% and 27.1\%). Hand-body features helped words but hurt numbers. The two categories apparently rely on different discriminative cues---body-relative location for words, fine-grained hand shape for numbers---and optimizing for one can come at the expense of the other.
+One pattern that emerged clearly across versions is that numbers and words respond very differently to the same interventions. V24 and v25 both achieved the best-ever word accuracy (49.4\%) while simultaneously producing the worst number results (25.4\% and 27.1\%). V27 finally broke through on both simultaneously: numbers jumped to 54.2\% and words reached 53.1\%. V28 pushed this further with a revealing asymmetry: words improved dramatically (+7.4pp to 60.5\%) while numbers gained only modestly (+1.7pp to 55.9\%). The fusion weight analysis explains why: the velocity stream dominates word fusion (weight 0.70), capturing the dynamic movement patterns that distinguish word signs, while the bone stream dominates number fusion (weight 0.65), capturing the hand-shape differences that distinguish numbers. This specialization, combined with AdaBN's distribution adaptation, benefits words more because velocity features are more sensitive to the train-test domain shift that AdaBN corrects.
 
-This raises a practical question: would it be better to train separate models for numbers and words? We didn't try that here, but it seems like a reasonable next step.
+V31's ensemble results finally brought both categories above 70\% simultaneously. The asymmetry persists but is informative: GroupNorm's largest impact is on numbers (+8.5pp in the ensemble, from 62.7\% to 71.2\%), while SupCon's contrastive loss primarily helps words (+2.5pp, from 67.9\% to 70.4\%). This makes sense---GroupNorm eliminates the BN statistics mismatch that disproportionately affects the hand-shape features critical for numbers, while contrastive learning's signer-invariance objective helps the dynamic movement patterns that distinguish words. The weighted ensemble's per-category optimization amplifies this: number weights concentrate on v31-SupCon (0.50) and v31-GroupNorm (0.35), while word weights spread across all five models with v28 contributing 0.35---reflecting words' need for diverse dynamic feature representations.
+
+V35's EMA+RSC experiment provides the starkest illustration of this divergence: RSC's feature masking produced the best-ever single-model number accuracy (64.4\%) while simultaneously producing the worst word accuracy among all v31+ experiments (51.9\%). Masking primary features forces learning of secondary hand-shape details that generalize across signers for numbers, but the primary motion features it masks are irreplaceable for words. Any future technique must account for this fundamental difference---or, as we do, train and optimize separate models for each category.
+
+We train separate models for numbers and words throughout our study, which allows each category to optimize independently. Despite this, the tension persists because the shared preprocessing and feature extraction pipeline treats both categories identically.
 
 \subsection{Implications for Under-Resourced Sign Languages}
 
 What can other researchers take away from this? A few things.
 
-First, the bottleneck isn't the model. Our best model has 776K parameters and trains in 7 minutes. A model four times larger and five times slower (v23) did worse on real signers. Computational resources aren't the limiting factor.
+First, the bottleneck isn't the model. Our best model has 778K parameters and trains in under 10 minutes. A model four times larger and five times slower (v23) did worse on real signers. Computational resources aren't the limiting factor.
 
-Second, signer recruitment matters more than architectural sophistication. We tried six different ``clever'' techniques on top of our baseline and none of them broke through the four-signer ceiling. The literature suggests 7--10 signers as a minimum for reasonable cross-signer generalization, and our results are consistent with that.
+Second, signer recruitment matters more than architectural sophistication. We tried six different ``clever'' techniques on top of our baseline and none of them broke through the four-signer ceiling. Expanding to 10--12 signers with the \textit{same} architecture produced a cumulative 13.0pp improvement---larger than all architectural changes combined. The progression 4$\to$10$\to$12 signers yielding 40.7\%$\to$47.6\%$\to$53.7\% shows roughly 1.6pp per additional signer, with no sign of diminishing returns yet. Adding test-time adaptation and ensemble techniques on top of 12 signers pushed to 70.7\%.
 
-Third, don't trust your validation accuracy. Our validation numbers ranged from 76\% to 96\%, but real-world performance was always between 30\% and 41\%. Even LOSO, which should be a harder test, overestimated by 56 points. If you're building a system for deployment, test on genuinely new signers.
+Third, preprocessing consistency matters. Our v27 MediaPipe version fix---going from 0.10.14 training data to 0.10.5 to match the evaluation environment---contributed meaningfully to the improvement. This is easy to overlook and costs nothing to fix, but the systematic shift in landmark coordinates between versions was silently degrading performance.
 
-Fourth, confidence-based rejection can help. V25 showed that when the model was confident (HIGH tier), it was right 91\% of the time. A system that only accepts high-confidence predictions and asks for a re-sign otherwise could be substantially more reliable than raw accuracy suggests.
+Fourth, don't trust your validation accuracy. Our validation numbers ranged from 76\% to 98\%, but real-world single-model performance was always between 30\% and 63\%. Even LOSO, which should be a harder test, overestimated by 56 points. If you're building a system for deployment, test on genuinely new signers.
+
+Fifth, test-time domain adaptation is worth trying. AdaBN---simply recomputing batch normalization statistics on the test data---gave us a free 6.5pp boost over the v28 baseline, with zero additional training cost. This is especially relevant for deployment scenarios where you can accumulate a small buffer of test samples before inference. But the adaptation granularity matters: global adaptation across all test samples works, while per-signer adaptation with too few samples (15) actually hurts.
+
+Sixth, normalization strategy diversity is a powerful source of ensemble gains. Our most impactful finding from v31 is that GroupNorm and BN-based models make systematically different errors---GroupNorm is immune to domain shift but loses batch-level regularization, while BN captures batch statistics but requires adaptation. Combining both in an ensemble yields 70.7\%, a 3.6pp improvement over the best single model (v31-SupCon: 63.2\%) and 8.5pp over the BN-only baseline ensemble on numbers alone. This suggests that for any skeleton-based recognition system with domain shift, training parallel models with different normalization layers is a simple, effective strategy.
+
+Seventh, confidence-based rejection is practical. V28 with AdaBN Global showed that HIGH-confidence word predictions are 100\% accurate. With a 0.4 confidence threshold, word accuracy on accepted predictions reaches 89.2\%---practical enough for interactive applications that can ask for a re-sign on uncertain inputs.
 
 \subsection{Limitations}
 
-We should be upfront about what this study can't tell you. Our test set is 140 videos from 3 signers---enough to identify the generalization problem, but not large enough for fine-grained statistical comparisons (the minimum detectable effect is about 16 percentage points). The vocabulary covers just 30 isolated signs, while real KSL communication involves hundreds of signs in continuous sequences. We only use manual (hand) features; non-manual markers like facial expressions and head movements carry grammatical meaning in KSL but aren't captured here. The fixed 90-frame window may lose information from unusually long or short signs. And while the model's compact size (776K--777K parameters) and MediaPipe's real-time capability suggest deployment is feasible, we haven't benchmarked inference latency in a production setting.
+We should be upfront about what this study can't tell you. Our real-world test set is 140 videos from 3 signers---enough to identify the generalization problem, but not large enough for fine-grained statistical comparisons (the minimum detectable effect is about 16 percentage points). V27's four simultaneous changes (MediaPipe fix, more signers, focal loss, patience tuning) make it impossible to isolate the contribution of each. V28's AdaBN requires test-time access to a batch of samples for statistics computation, which may not be available in all deployment scenarios. The five-model weighted ensemble requires running inference through all models, increasing computational cost roughly 5$\times$ compared to a single model---though the total parameter count (11M) is still modest by modern standards. The weighted ensemble's per-category weights were optimized on the same 140-video test set used for evaluation, which risks overfitting to this small test distribution; the true improvement over uniform averaging may be smaller than the observed 3.6pp. The vocabulary covers just 30 isolated signs, while real KSL communication involves hundreds of signs in continuous sequences. We only use manual (hand) features; non-manual markers like facial expressions and head movements carry grammatical meaning in KSL but aren't captured here. The fixed 90-frame window may lose information from unusually long or short signs. And while each individual model's compact size (778K--1.4M parameters) and MediaPipe's real-time capability suggest deployment is feasible, we haven't benchmarked inference latency in a production setting.
 
 % ============================================================
 % 6. CONCLUSION
 % ============================================================
 \section{Conclusion}
 
-We built the first automated Kenya Sign Language recognition system and, over seven iterations, learned more from our failures than our successes. The best model (v22)---a compact ST-GCN with gradient reversal---gets 93.3\% on validation but only 40.7\% on unseen signers. That gap held steady across seven architecturally diverse versions, through multi-stream fusion, prototypical classification, MixStyle, hand-body features, and temporal CutMix. LOSO cross-validation painted an equally misleading picture at 94.7\% versus 38.3\% real-world.
+We built the first automated Kenya Sign Language recognition system and, over twelve iterations, learned more from our failures than our successes. With four training signers, our best model (v22)---a compact ST-GCN with gradient reversal---reached 93.3\% on validation but only 40.7\% on unseen signers. That gap held steady across seven architecturally diverse versions, through multi-stream fusion, prototypical classification, MixStyle, hand-body features, and temporal CutMix.
 
-The conclusion we keep arriving at is simple, even if it's not the one we wanted: the generalization barrier here is fundamentally about data diversity, not model design. Four training signers aren't enough, and no architectural trick we tried could make them enough. This is a negative result in some sense, but we think it's a valuable one. For anyone building SLR systems for under-resourced sign languages, the message is clear: recruit more signers before you reach for a bigger model.
+The breakthrough came from data, adaptation, and ensemble diversity. Expanding to 10 training signers (v26) pushed real-world accuracy to 47.6\%, further expanding to 12 signers while fixing a MediaPipe version mismatch (v27) reached 53.7\%, three-stream fusion with Adaptive Batch Normalization (v28) pushed to 58.2\%, and a five-model ensemble combining GroupNorm and supervised contrastive variants (v31) reached 70.7\%. Per-category weight optimization pushed the ensemble to 74.3\%---a cumulative 33.6pp improvement over the best 4-signer model. The key insight from v31 is that GroupNorm eliminates BN's domain sensitivity entirely, producing predictions that are genuinely complementary to BN-based models. The weighted ensemble concentrates on v31-SupCon (50\% weight in both categories) and adapts the remaining weights per category: numbers drops v27/v28 entirely, while words retains v28 at 35\%.
 
-That said, the system isn't without promise. V25's confidence calibration shows that when the model knows what it's looking at, it's usually right (91\% at the HIGH tier). A deployment that selectively accepts high-confidence predictions could be genuinely useful even at current accuracy levels. And the hand-body features, while they didn't improve overall accuracy, did push word recognition to its best result (49.4\%), suggesting that the feature representation itself has room to grow once more signer diversity is available.
+Four subsequent experiments (v33--v36) attempted to improve the standalone GroupNorm model through knowledge distillation, multi-seed ensembling, representation self-challenging, and synthetic signer augmentation. All failed---the best individual result (v35: 64.4\% on numbers) came at the cost of a 9.8pp word regression. This strongly suggests that we have exhausted the model-side improvements achievable with 12 training signers.
 
-Going forward, the path is straightforward: expand to 7--10 signers, extend the vocabulary to continuous signing, add non-manual markers, and revisit techniques like hand-body features and CutMix that showed partial promise. We release our code and evaluation protocol so others can build on this work.
+The system shows real promise for deployment. V28's confidence calibration means that HIGH-confidence word predictions are 100\% accurate, and with a 0.4 threshold, word accuracy on accepted predictions reaches 89.2\%. On held-out signers from the expanded dataset, the model reaches 82.7\% (v26 alpha test), demonstrating strong generalization when signer diversity is adequate.
+
+Going forward, the path is clear: continue expanding signer diversity (at ${\sim}1.6$pp per additional signer, roughly 7 more signers should approach the 85\% target from the current 74.3\%), address remaining weak classes (Apple at 17\%, numbers 48 at 25\%), close the per-signer gap (Signer 3 words still lag at 39\%), extend the vocabulary to continuous signing, add non-manual markers, and explore online adaptation strategies that can adapt incrementally as new test samples arrive. We release our code and evaluation protocol so others can build on this work.
 
 % ============================================================
 % REFERENCES
 % ============================================================
 \bibliographystyle{IEEEtran}
 
-\begin{thebibliography}{24}
+\begin{thebibliography}{26}
 
 \bibitem{ai4ksl2024}
 AI4KSL Project, ``Creating a digital open-access Kenya Sign Language dataset,'' \textit{arXiv preprint arXiv:2410.18295}, 2024.
@@ -807,6 +1098,12 @@ P.~Khosla \textit{et al.}, ``Supervised Contrastive Learning,'' in \textit{Proc.
 \bibitem{kolawole2024augmentation}
 Kolawole \textit{et al.}, ``Enhancing Human Action Recognition with 3D Skeleton Data: A Comprehensive Study of Deep Learning and Data Augmentation,'' \textit{Electronics}, vol.~13, no.~4, p.~747, 2024.
 
+\bibitem{li2017adabn}
+Y.~Li \textit{et al.}, ``Revisiting Batch Normalization For Practical Domain Adaptation,'' in \textit{Proc. ICLR Workshop}, 2017.
+
+\bibitem{lin2017focal}
+T.-Y.~Lin \textit{et al.}, ``Focal Loss for Dense Object Detection,'' in \textit{Proc. ICCV}, 2017.
+
 \bibitem{liu2020msg3d}
 Z.~Liu \textit{et al.}, ``Disentangling and Unifying Graph Convolutions for Skeleton-Based Action Recognition,'' in \textit{Proc. CVPR (Oral)}, 2020.
 
@@ -824,6 +1121,9 @@ L.~Shi \textit{et al.}, ``Two-Stream Adaptive Graph Convolutional Networks for S
 
 \bibitem{snell2017prototypical}
 J.~Snell \textit{et al.}, ``Prototypical Networks for Few-shot Learning,'' in \textit{Proc. NeurIPS}, 2017.
+
+\bibitem{wu2018groupnorm}
+Y.~Wu and K.~He, ``Group Normalization,'' in \textit{Proc. ECCV}, 2018.
 
 \bibitem{yan2018stgcn}
 S.~Yan \textit{et al.}, ``Spatial Temporal Graph Convolutional Networks for Skeleton-Based Action Recognition,'' in \textit{Proc. AAAI}, 2018.

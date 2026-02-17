@@ -165,9 +165,10 @@ def process_single_video(task):
     """
     video_path = task["video_path"]
     out_path = task["out_path"]
+    force = task.get("force", False)
 
-    # Skip if already extracted
-    if os.path.exists(out_path):
+    # Skip if already extracted (unless --force)
+    if not force and os.path.exists(out_path):
         return (out_path, None, True, "skipped")
 
     # Make output dir (safe for concurrent calls)
@@ -195,6 +196,8 @@ def main():
                         help="Which split to process")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of parallel workers (default: 1)")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-extract even if .npy already exists")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -277,6 +280,7 @@ def main():
         tasks.append({
             "video_path": video_path,
             "out_path": out_path,
+            "force": args.force,
         })
 
     if skipped_parse or skipped_missing:
@@ -302,13 +306,14 @@ def main():
                 failed += 1
                 print(f"  FAILED: {task['video_path']} ({status})")
 
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 10 == 0:
                 elapsed = time.time() - start_time
                 rate = (i + 1) / elapsed
                 remaining = (len(tasks) - i - 1) / rate
                 print(f"[{ts()}] {i + 1}/{len(tasks)} "
                       f"({success} ok, {failed} failed, {skipped} skipped) "
-                      f"[{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining]")
+                      f"[{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining]",
+                      flush=True)
     else:
         # Parallel mode
         completed = 0
@@ -326,19 +331,20 @@ def main():
                     else:
                         failed += 1
                         task = futures[future]
-                        print(f"  FAILED: {task['video_path']} ({status})")
+                        print(f"  FAILED: {task['video_path']} ({status})", flush=True)
                 except Exception as e:
                     failed += 1
                     task = futures[future]
-                    print(f"  ERROR: {task['video_path']} ({e})")
+                    print(f"  ERROR: {task['video_path']} ({e})", flush=True)
 
-                if completed % 50 == 0:
+                if completed % 10 == 0:
                     elapsed = time.time() - start_time
                     rate = completed / elapsed
                     remaining = (len(tasks) - completed) / rate
                     print(f"[{ts()}] {completed}/{len(tasks)} "
                           f"({success} ok, {failed} failed, {skipped} skipped) "
-                          f"[{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining]")
+                          f"[{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining]",
+                          flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 70}")

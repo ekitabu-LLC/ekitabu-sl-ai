@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
 """
-Evaluate v26 model on real-world test signers.
+Evaluate v27 model on real-world test signers.
 
-V26 evaluates models trained on the ksl-alpha dataset (15 signers).
-Architecture and preprocessing are identical to v25 (hand-body features, same aux_dim).
-
-V26 changes from v25:
-- Training data: ksl-alpha dataset (signers 1-12 train, 13-15 test)
-- MediaPipe version: same version used for both training and evaluation (both on Alpine)
-- Optional ksl-alpha test set evaluation (signers 13-15, pre-extracted .npy files)
-
-V25/v26 shared features:
-- Hand-to-body spatial features (8 features) computed BEFORE wrist-centric normalization
-- Updated aux_dim: NUM_ANGLE_FEATURES + 20 fingertip distances + 8 hand-body features
-- Temporal CutMix used during training (no effect on eval)
+V27 changes from v26:
+- MediaPipe fix: Training data re-extracted with 0.10.5 (matches eval environment)
+- 12 training signers (train_alpha + val_alpha combined)
+- Focal loss for words model (gamma=2, class-balanced alpha)
+- Architecture and preprocessing are identical to v25/v26
 
 Usage:
-    python evaluate_real_testers_v26.py
+    python evaluate_real_testers_v27.py
 """
 
 import os
@@ -38,15 +31,20 @@ import mediapipe as mp
 # ---------------------------------------------------------------------------
 
 def check_mediapipe_version():
-    """Check MediaPipe version. V26 training data was extracted on Alpine with the same
-    MediaPipe version as evaluation, so no version mismatch is expected."""
+    """Check MediaPipe version. V27 training data was re-extracted with 0.10.5 on Alpine,
+    matching the evaluation environment. No version mismatch expected."""
     version = mp.__version__
+    expected = "0.10.5"
     print(f"  MediaPipe version: {version}")
-    print(f"  (v26 training data was extracted with the same MediaPipe version on Alpine)")
+    if version == expected:
+        print(f"  (matches v27 training data extraction version)")
+    else:
+        print(f"  WARNING: Expected {expected} (v27 training data version). "
+              f"Landmark coordinates may differ.")
 
 
 # ---------------------------------------------------------------------------
-# Constants (matching train_ksl_v25.py -- v26 uses same architecture)
+# Constants (matching train_ksl_v27.py -- same v25/v26 architecture)
 # ---------------------------------------------------------------------------
 
 POSE_INDICES = [11, 12, 13, 14, 15, 16]
@@ -521,7 +519,7 @@ def discover_test_videos(base_dir):
 
 
 # ---------------------------------------------------------------------------
-# Inference (v26: same as v25/v22, no ArcFace, no labels in forward)
+# Inference (v27: same as v25/v26, no ArcFace, no labels in forward)
 # ---------------------------------------------------------------------------
 
 def run_inference(model, raw, device, classes, use_tta=True):
@@ -913,11 +911,11 @@ def evaluate_alpha_test_set(test_dir, model, device, classes, category_name):
 def main():
     base_dir = "/scratch/alpine/hama5612/ksl-alpha/data/real_testers"
     ckpt_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/checkpoints"
-    alpha_test_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/test_alpha"
 
     print("=" * 70)
-    print("V26 Real-World Evaluation (with TTA + Confidence Analysis)")
-    print(f"Trained on ksl-alpha dataset (15 signers)")
+    print("V27 Real-World Evaluation (with TTA + Confidence Analysis)")
+    print(f"Trained on 12 signers (train_alpha + val_alpha), MediaPipe 0.10.5")
+    print(f"Words model uses focal loss (gamma=2, class-balanced alpha)")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
@@ -940,13 +938,13 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # Import v25 model class (v26 uses same architecture as v25)
-    from train_ksl_v25 import KSLGraphNetV25, build_adj
+    # Import model class (v27 uses same architecture as v25/v26)
+    from train_ksl_v27 import KSLGraphNetV25, build_adj
 
     results = {}
 
     # ===== NUMBERS =====
-    numbers_ckpt = os.path.join(ckpt_dir, "v26_numbers", "best_model.pt")
+    numbers_ckpt = os.path.join(ckpt_dir, "v27_numbers", "best_model.pt")
     if os.path.exists(numbers_ckpt) and numbers_videos:
         print(f"\n{'='*70}")
         print(f"NUMBERS EVALUATION ({len(numbers_videos)} videos)")
@@ -983,15 +981,6 @@ def main():
         results["numbers"] = evaluate_category(
             "Numbers", numbers_videos, model, device, NUMBER_CLASSES
         )
-
-        # ksl-alpha test set evaluation for numbers
-        # test_alpha/ contains class subdirs directly (e.g., test_alpha/100/, test_alpha/Apple/)
-        if os.path.isdir(alpha_test_dir):
-            alpha_result = evaluate_alpha_test_set(
-                alpha_test_dir, model, device, NUMBER_CLASSES, "Numbers"
-            )
-            if alpha_result is not None:
-                results["alpha_test_numbers"] = alpha_result
     else:
         if not os.path.exists(numbers_ckpt):
             print(f"\nSkipping numbers: checkpoint not found at {numbers_ckpt}")
@@ -999,7 +988,7 @@ def main():
             print(f"\nSkipping numbers: no test videos found")
 
     # ===== WORDS =====
-    words_ckpt = os.path.join(ckpt_dir, "v26_words", "best_model.pt")
+    words_ckpt = os.path.join(ckpt_dir, "v27_words", "best_model.pt")
     if os.path.exists(words_ckpt) and words_videos:
         print(f"\n{'='*70}")
         print(f"WORDS EVALUATION ({len(words_videos)} videos)")
@@ -1036,15 +1025,6 @@ def main():
         results["words"] = evaluate_category(
             "Words", words_videos, model, device, WORD_CLASSES
         )
-
-        # ksl-alpha test set evaluation for words
-        # test_alpha/ contains class subdirs directly (e.g., test_alpha/100/, test_alpha/Apple/)
-        if os.path.isdir(alpha_test_dir):
-            alpha_result = evaluate_alpha_test_set(
-                alpha_test_dir, model, device, WORD_CLASSES, "Words"
-            )
-            if alpha_result is not None:
-                results["alpha_test_words"] = alpha_result
     else:
         if not os.path.exists(words_ckpt):
             print(f"\nSkipping words: checkpoint not found at {words_ckpt}")
@@ -1053,7 +1033,7 @@ def main():
 
     # ===== FINAL SUMMARY =====
     print(f"\n{'='*70}")
-    print("FINAL SUMMARY - V26 Real-World Evaluation")
+    print("FINAL SUMMARY - V27 Real-World Evaluation")
     print(f"{'='*70}")
 
     if "numbers" in results:
@@ -1072,22 +1052,6 @@ def main():
         print(f"\n  Combined (TTA):    {combined_tta:.1f}%")
         print(f"  Combined (no-TTA): {combined_noTTA:.1f}%")
         print(f"  TTA effect:        {combined_tta - combined_noTTA:+.1f}%")
-
-    # ksl-alpha test set summary
-    if "alpha_test_numbers" in results or "alpha_test_words" in results:
-        print(f"\n  KSL-Alpha Test Set (signers 13-15):")
-        if "alpha_test_numbers" in results:
-            r = results["alpha_test_numbers"]
-            print(f"    Numbers: {r['overall_accuracy']:.1f}% ({r['correct']}/{r['total']})")
-        if "alpha_test_words" in results:
-            r = results["alpha_test_words"]
-            print(f"    Words:   {r['overall_accuracy']:.1f}% ({r['correct']}/{r['total']})")
-        if "alpha_test_numbers" in results and "alpha_test_words" in results:
-            combined_alpha = (
-                results["alpha_test_numbers"]["overall_accuracy"] +
-                results["alpha_test_words"]["overall_accuracy"]
-            ) / 2
-            print(f"    Combined: {combined_alpha:.1f}%")
 
     # Confidence summary
     print(f"\n  Confidence Summary (all predictions):")
@@ -1125,18 +1089,19 @@ def main():
               f"({100.0 * low_total / all_total:.0f}% of predictions)")
 
     # Previous version comparison
-    print(f"\n  Previous versions (for comparison):")
+    print(f"\n  Previous versions (for comparison, no-TTA):")
     print(f"    V19: Numbers 20.3% | Words 48.1% | Combined 34.2%")
     print(f"    V20: Numbers 20.3% | Words 40.7% | Combined 30.5%")
     print(f"    V21: Numbers 25.4% | Words 37.0% | Combined 31.2%")
     print(f"    V22: Numbers 33.9% | Words 45.7% | Combined 39.8%")
     print(f"    V25: Numbers 27.1% | Words 49.4% | Combined 38.3%")
+    print(f"    V26: Numbers 45.8% | Words 49.4% | Combined 47.6%  <-- previous best")
 
     # Save results
     results_dir = "/scratch/alpine/hama5612/ksl-dir-2/data/results"
     os.makedirs(results_dir, exist_ok=True)
     ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_path = os.path.join(results_dir, f"v26_real_testers_{ts_str}.json")
+    results_path = os.path.join(results_dir, f"v27_real_testers_{ts_str}.json")
 
     def make_serializable(obj):
         if isinstance(obj, np.ndarray):
@@ -1154,9 +1119,9 @@ def main():
         return obj
 
     results_out = {
-        "version": "v26",
+        "version": "v27",
         "evaluation_type": "real_testers",
-        "training_data": "ksl-alpha (15 signers, signers 1-12 train, 13-15 test)",
+        "training_data": "ksl-alpha (12 signers train [1-12], 3 val [13-15])",
         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         "tta_enabled": True,
         "tta_augmentations": [
@@ -1174,10 +1139,10 @@ def main():
             "64-dim with temporal conv1d)"
         ),
         "model": "KSLGraphNetV25 (ST-GCN + bigger aux MLP + signer-adversarial, no ArcFace)",
-        "v26_changes": [
-            "Training data: ksl-alpha dataset (15 signers instead of 5)",
-            "MediaPipe version matched between training and evaluation (both on Alpine)",
-            "Optional ksl-alpha test set evaluation (signers 13-15)",
+        "v27_changes": [
+            "MediaPipe fix: training data re-extracted with 0.10.5 on Alpine (matches eval)",
+            "12 training signers (train_alpha 1-10 + val_alpha 11-12), val on test_alpha 13-15",
+            "Focal loss for words model (gamma=2, class-balanced alpha weights)",
         ],
         "results": make_serializable(results),
     }
