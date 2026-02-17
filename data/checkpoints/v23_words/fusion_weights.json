@@ -1,0 +1,9 @@
+{
+  "weights": {
+    "joint": 0.1,
+    "bone": 0.2,
+    "velocity": 0.2,
+    "bone_velocity": 0.49999999999999994
+  },
+  "val_acc": 94.02173913043478
+}

@@ -1,0 +1,10 @@
+{
+  "weights": {
+    "joint": 0.1,
+    "bone": 0.15,
+    "velocity": 0.75
+  },
+  "val_accuracy": 77.77777777777779,
+  "equal_weights_accuracy": 72.44444444444444,
+  "category": "Words"
+}

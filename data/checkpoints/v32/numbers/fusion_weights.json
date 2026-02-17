@@ -1,0 +1,10 @@
+{
+  "weights": {
+    "joint": 0.4,
+    "bone": 0.1,
+    "velocity": 0.5
+  },
+  "val_accuracy": 96.88888888888889,
+  "equal_weights_accuracy": 96.44444444444444,
+  "category": "Numbers"
+}
