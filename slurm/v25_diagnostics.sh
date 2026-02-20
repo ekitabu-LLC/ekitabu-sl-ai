@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=v25_diagnostics
+#SBATCH --account=ucb765_asc1
 #SBATCH --partition=atesting_a100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=ksl_v42_numbers
-#SBATCH --partition=aa100
+#SBATCH --account=ucb765_asc1
+#SBATCH --partition=al40
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1

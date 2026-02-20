@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --account=ucb765_asc1
 #SBATCH --partition=atesting_a100
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1

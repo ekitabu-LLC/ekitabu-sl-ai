@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=eval_v42
+#SBATCH --account=ucb765_asc1
 #SBATCH --partition=atesting_a100
 #SBATCH --qos=testing
 #SBATCH --gres=gpu:1
