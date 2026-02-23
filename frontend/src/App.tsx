@@ -73,7 +73,7 @@ function StatusIndicator({ isConnected }: { isConnected: boolean }) {
 }
 
 function App() {
-  const [modelVersion, setModelVersion] = useState("v14")
+  const [modelVersion, setModelVersion] = useState("ensemble_6_uniform")
   const [modelType, setModelType] = useState("numbers")
   const [predictions, setPredictions] = useState<Prediction[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -178,7 +178,7 @@ function App() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 mb-6">
             <Sparkles className="w-4 h-4 text-primary" />
-            <span className="text-sm font-medium text-primary">ST-GCN Architecture Powered</span>
+            <span className="text-sm font-medium text-primary">Multi-Stream ST-GCN Ensemble</span>
           </div>
 
           <h2 className="text-4xl md:text-5xl lg:text-6xl font-display italic text-foreground mb-4">
@@ -293,7 +293,7 @@ function App() {
         >
           <div className="flex flex-wrap items-center justify-between gap-4 text-xs font-mono text-muted-foreground">
             <div className="flex items-center gap-6">
-              <span>KSL_NEURAL_v2.0</span>
+              <span>KSL_NEURAL_v3.0</span>
               <span className="hidden sm:inline">•</span>
               <span className="hidden sm:inline">SPATIAL_TEMPORAL_GRAPH_CONV</span>
             </div>

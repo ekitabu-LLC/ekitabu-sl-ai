@@ -10,13 +10,11 @@ interface ModelVersion {
 }
 
 const modelVersions: ModelVersion[] = [
-  { id: "v8", name: "v8", architecture: "TemporalPyramid", description: "Multi-scale temporal features" },
-  { id: "v9", name: "v9", architecture: "TemporalPyramid", description: "Enhanced segmentation" },
-  { id: "v10", name: "v10", architecture: "ST-GCN", description: "Graph convolutions" },
-  { id: "v11", name: "v11", architecture: "ST-GCN", description: "Improved topology" },
-  { id: "v12", name: "v12", architecture: "ST-GCN", description: "Attention mechanisms" },
-  { id: "v13", name: "v13", architecture: "ST-GCN", description: "Domain adaptation" },
-  { id: "v14", name: "v14", architecture: "ST-GCN", description: "Extreme regularization", isRecommended: true },
+  { id: "ensemble_6_uniform", name: "6-Model Ensemble", architecture: "ST-GCN Multi-Stream", description: "Best overall: 72.9% combined", isRecommended: true },
+  { id: "v43", name: "V43", architecture: "ST-GCN + SupCon + R&R", description: "Best single model: 65.7% combined" },
+  { id: "v41", name: "V41", architecture: "ST-GCN GroupNorm + R&R", description: "Best numbers: 67.8%" },
+  { id: "exp5", name: "Exp5", architecture: "ST-GCN + SupCon", description: "Best words: 65.4%" },
+  { id: "exp1", name: "Exp1", architecture: "ST-GCN GroupNorm", description: "Baseline: 61.4%" },
 ]
 
 const modelTypes = [
