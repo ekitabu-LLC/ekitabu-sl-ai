@@ -590,18 +590,13 @@ def run_member_inference(member_name: str, model_dict: dict, raw: np.ndarray,
     """Run inference for a single ensemble member."""
     model_type = model_dict["type"]
 
-    # Build adaptation data (single sample)
+    # AdaBN disabled for single predictions — needs 50+ samples to be effective
     if model_type == "multistream":
-        adapt_data = [(streams, aux)]
-        return run_single_multistream(model_dict, streams, aux, device, adapt_data)
+        return run_single_multistream(model_dict, streams, aux, device, adapt_data=None)
     elif model_type == "singlestream":
-        gcn_t, aux_t = preprocess_v27(raw)
-        adapt_data = [(gcn_t, aux_t)] if gcn_t is not None else None
-        return run_single_singlestream(model_dict, raw, device, adapt_data)
+        return run_single_singlestream(model_dict, raw, device, adapt_data=None)
     elif model_type == "openhands":
-        oh_t = preprocess_raw_for_openhands(raw)
-        adapt_data = [oh_t] if oh_t is not None else None
-        return run_openhands_inference(model_dict, raw, device, adapt_data)
+        return run_openhands_inference(model_dict, raw, device, adapt_data=None)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
