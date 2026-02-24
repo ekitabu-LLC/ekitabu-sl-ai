@@ -13,20 +13,18 @@ interface PredictResponse {
 }
 
 export async function predictSign(
-  frames: string[],
+  video: Blob,
   modelVersion: string,
   modelType: string = "numbers"
 ): Promise<PredictResponse> {
+  const form = new FormData()
+  form.append("video", video, "sign.webm")
+  form.append("model_version", modelVersion)
+  form.append("model_type", modelType)
+
   const response = await fetch(`${API_BASE_URL}/predict`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      frames,
-      model_version: modelVersion,
-      model_type: modelType,
-    }),
+    body: form,
   })
 
   if (!response.ok) {

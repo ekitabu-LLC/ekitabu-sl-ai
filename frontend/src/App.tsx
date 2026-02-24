@@ -79,7 +79,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [capturedFrames, setCapturedFrames] = useState<string[]>([])
+  const [capturedVideo, setCapturedVideo] = useState<Blob | null>(null)
   const [isConnected, setIsConnected] = useState(false)
 
   useEffect(() => {
@@ -88,15 +88,15 @@ function App() {
     return () => clearTimeout(timer)
   }, [])
 
-  const handleFramesCapture = useCallback(
-    async (frames: string[]) => {
-      setCapturedFrames(frames)
+  const handleVideoCapture = useCallback(
+    async (video: Blob) => {
+      setCapturedVideo(video)
       setIsLoading(true)
       setError(null)
       setPredictions([])
 
       try {
-        const result = await predictSign(frames, modelVersion, modelType)
+        const result = await predictSign(video, modelVersion, modelType)
         setPredictions(result.predictions)
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to get prediction")
@@ -108,10 +108,10 @@ function App() {
   )
 
   const handleRetry = useCallback(() => {
-    if (capturedFrames.length > 0) {
-      handleFramesCapture(capturedFrames)
+    if (capturedVideo) {
+      handleVideoCapture(capturedVideo)
     }
-  }, [capturedFrames, handleFramesCapture])
+  }, [capturedVideo, handleVideoCapture])
 
   return (
     <div className="min-h-screen neural-bg">
@@ -239,7 +239,7 @@ function App() {
                   onRunModel={handleRetry}
                   modelVersion={modelVersion}
                   modelType={modelType}
-                  hasFrames={capturedFrames.length > 0}
+                  hasFrames={capturedVideo !== null}
                 />
               </motion.div>
             </AnimatePresence>
@@ -253,7 +253,7 @@ function App() {
             className="lg:col-span-3"
           >
             <WebcamCapture
-              onFramesCapture={handleFramesCapture}
+              onVideoCapture={handleVideoCapture}
               isRecording={isRecording}
               setIsRecording={setIsRecording}
             />
@@ -266,8 +266,8 @@ function App() {
               className="mt-6 grid grid-cols-3 gap-4"
             >
               {[
-                { label: "Frame Rate", value: "30 FPS" },
                 { label: "Max Duration", value: "5 SEC" },
+                { label: "Format", value: "WEBM/MP4" },
                 { label: "Resolution", value: "640×480" },
               ].map((spec) => (
                 <div

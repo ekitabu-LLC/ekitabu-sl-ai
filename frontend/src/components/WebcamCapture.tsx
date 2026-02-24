@@ -2,45 +2,43 @@ import { useRef, useState, useCallback, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Video, VideoOff, Camera, Square, Upload, Scan, Circle, Play, X } from "lucide-react"
 
+const MAX_DURATION_MS = 5000 // 5 seconds max recording
+
 interface WebcamCaptureProps {
-  onFramesCapture: (frames: string[]) => void
+  onVideoCapture: (video: Blob) => void
   isRecording: boolean
   setIsRecording: (recording: boolean) => void
 }
 
-export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: WebcamCaptureProps) {
+export function WebcamCapture({ onVideoCapture, isRecording, setIsRecording }: WebcamCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const previewVideoRef = useRef<HTMLVideoElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const recordingTimerRef = useRef<number | null>(null)
+  const recordingStartRef = useRef<number>(0)
+
   const [stream, setStream] = useState<MediaStream | null>(null)
   const [isCameraOn, setIsCameraOn] = useState(false)
-  const [recordedFrames, setRecordedFrames] = useState<string[]>([])
-  const [frameCount, setFrameCount] = useState(0)
-  const [recordingProgress, setRecordingProgress] = useState(0)
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null)
-  const [isProcessingUpload, setIsProcessingUpload] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
-  const recordingRef = useRef<number | null>(null)
-  const framesRef = useRef<string[]>([])
+  const [hasVideo, setHasVideo] = useState(false)
+  const [recordingElapsed, setRecordingElapsed] = useState(0)
 
   const startCamera = useCallback(async () => {
-    // Clear any uploaded video preview
     if (uploadedVideoUrl) {
       URL.revokeObjectURL(uploadedVideoUrl)
       setUploadedVideoUrl(null)
+      setHasVideo(false)
     }
-
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480, facingMode: "user" },
         audio: false,
       })
-
       setStream(mediaStream)
       setIsCameraOn(true)
-
-      // Set video source after state update
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream
@@ -63,174 +61,100 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
     }
     setIsCameraOn(false)
     setIsRecording(false)
-    setRecordingProgress(0)
-    setFrameCount(0)
-    framesRef.current = []
-    if (recordingRef.current) {
-      cancelAnimationFrame(recordingRef.current)
-      recordingRef.current = null
+    setRecordingElapsed(0)
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current)
+      recordingTimerRef.current = null
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop()
     }
   }, [stream, setIsRecording])
 
-  const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return null
-    const canvas = canvasRef.current
-    const video = videoRef.current
-
-    if (video.readyState < 2 || video.videoWidth === 0) return null
-
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return null
-
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    ctx.drawImage(video, 0, 0)
-    return canvas.toDataURL("image/jpeg", 0.8)
-  }, [])
-
   const startRecording = useCallback(() => {
-    framesRef.current = []
-    setRecordedFrames([])
-    setFrameCount(0)
-    setRecordingProgress(0)
+    if (!stream) return
+    chunksRef.current = []
+    setRecordingElapsed(0)
     setIsRecording(true)
+    setHasVideo(false)
 
-    let count = 0
-    const targetFps = 30
-    const maxFrames = 150
-    const frameDuration = 1000 / targetFps
-    let lastTime = performance.now()
+    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+      ? "video/webm;codecs=vp9"
+      : MediaRecorder.isTypeSupported("video/webm")
+      ? "video/webm"
+      : "video/mp4"
 
-    const recordFrame = (currentTime: number) => {
-      if (currentTime - lastTime >= frameDuration) {
-        const frame = captureFrame()
-        if (frame) {
-          framesRef.current.push(frame)
-          count++
-          setFrameCount(count)
-          setRecordingProgress((count / maxFrames) * 100)
-        }
-        lastTime = currentTime
-      }
+    const recorder = new MediaRecorder(stream, { mimeType })
+    mediaRecorderRef.current = recorder
 
-      if (count < maxFrames) {
-        recordingRef.current = requestAnimationFrame(recordFrame)
-      } else {
-        setIsRecording(false)
-        setRecordedFrames([...framesRef.current])
-        onFramesCapture([...framesRef.current])
-        recordingRef.current = null
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data)
+    }
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: mimeType })
+      setIsRecording(false)
+      setHasVideo(true)
+      onVideoCapture(blob)
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current)
+        recordingTimerRef.current = null
       }
     }
 
-    recordingRef.current = requestAnimationFrame(recordFrame)
-  }, [captureFrame, onFramesCapture, setIsRecording])
+    recorder.start(100) // collect data in 100ms chunks
+    recordingStartRef.current = performance.now()
+
+    recordingTimerRef.current = window.setInterval(() => {
+      const elapsed = performance.now() - recordingStartRef.current
+      setRecordingElapsed(elapsed)
+      if (elapsed >= MAX_DURATION_MS) {
+        recorder.stop()
+      }
+    }, 100)
+  }, [stream, onVideoCapture, setIsRecording])
 
   const stopRecording = useCallback(() => {
-    if (recordingRef.current) {
-      cancelAnimationFrame(recordingRef.current)
-      recordingRef.current = null
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop()
     }
-
-    setIsRecording(false)
-
-    const capturedFrames = [...framesRef.current]
-    setRecordedFrames(capturedFrames)
-
-    if (capturedFrames.length >= 10) {
-      onFramesCapture(capturedFrames)
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current)
+      recordingTimerRef.current = null
     }
-  }, [onFramesCapture, setIsRecording])
+  }, [])
 
   const clearUploadedVideo = useCallback(() => {
     if (uploadedVideoUrl) {
       URL.revokeObjectURL(uploadedVideoUrl)
       setUploadedVideoUrl(null)
     }
-    setRecordedFrames([])
-    setFrameCount(0)
+    setHasVideo(false)
   }, [uploadedVideoUrl])
 
   const processVideoFile = useCallback(
-    async (file: File) => {
-      // Check if it's a video file
+    (file: File) => {
       if (!file.type.startsWith("video/")) {
         alert("Please drop a video file")
         return
       }
+      if (isCameraOn) stopCamera()
+      if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl)
 
-      // Stop camera if on
-      if (isCameraOn) {
-        stopCamera()
-      }
-
-      // Clear previous upload
-      if (uploadedVideoUrl) {
-        URL.revokeObjectURL(uploadedVideoUrl)
-      }
-
-      setIsProcessingUpload(true)
-
-      const videoUrl = URL.createObjectURL(file)
-      setUploadedVideoUrl(videoUrl)
-
-      const video = document.createElement("video")
-      video.src = videoUrl
-      video.muted = true
-
-      video.onloadedmetadata = async () => {
-        const canvas = document.createElement("canvas")
-        const ctx = canvas.getContext("2d")
-        if (!ctx) {
-          setIsProcessingUpload(false)
-          return
-        }
-
-        canvas.width = video.videoWidth
-        canvas.height = video.videoHeight
-
-        const frames: string[] = []
-        const duration = video.duration
-        const targetFrames = Math.min(Math.floor(duration * 30), 150)
-        const interval = duration / targetFrames
-
-        for (let i = 0; i < targetFrames; i++) {
-          video.currentTime = i * interval
-          await new Promise((resolve) => {
-            video.onseeked = resolve
-          })
-          ctx.drawImage(video, 0, 0)
-          frames.push(canvas.toDataURL("image/jpeg", 0.8))
-        }
-
-        framesRef.current = frames
-        setRecordedFrames(frames)
-        setFrameCount(frames.length)
-        setIsProcessingUpload(false)
-        onFramesCapture(frames)
-      }
-
-      video.onerror = () => {
-        setIsProcessingUpload(false)
-        alert("Error loading video file")
-      }
-
-      video.load()
+      const url = URL.createObjectURL(file)
+      setUploadedVideoUrl(url)
+      setHasVideo(true)
+      onVideoCapture(file) // File extends Blob
     },
-    [isCameraOn, stopCamera, uploadedVideoUrl, onFramesCapture]
+    [isCameraOn, stopCamera, uploadedVideoUrl, onVideoCapture]
   )
 
   const handleVideoUpload = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
+    (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0]
       if (!file) return
-
-      await processVideoFile(file)
-
-      // Reset file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ""
-      }
+      processVideoFile(file)
+      if (fileInputRef.current) fileInputRef.current.value = ""
     },
     [processVideoFile]
   )
@@ -248,37 +172,30 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
   }, [])
 
   const handleDrop = useCallback(
-    async (event: React.DragEvent) => {
+    (event: React.DragEvent) => {
       event.preventDefault()
       event.stopPropagation()
       setIsDragging(false)
-
       const file = event.dataTransfer.files?.[0]
-      if (file) {
-        await processVideoFile(file)
-      }
+      if (file) processVideoFile(file)
     },
     [processVideoFile]
   )
 
   useEffect(() => {
     return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop())
-      }
-      if (recordingRef.current) {
-        cancelAnimationFrame(recordingRef.current)
-      }
-      if (uploadedVideoUrl) {
-        URL.revokeObjectURL(uploadedVideoUrl)
-      }
+      if (stream) stream.getTracks().forEach((t) => t.stop())
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+      if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl)
     }
   }, [stream, uploadedVideoUrl])
 
-  // Determine what to show in the video area
   const showCamera = isCameraOn && !uploadedVideoUrl
-  const showUploadedVideo = uploadedVideoUrl && !isCameraOn
+  const showUploadedVideo = !!uploadedVideoUrl && !isCameraOn
   const showPlaceholder = !isCameraOn && !uploadedVideoUrl
+
+  const recordingProgress = Math.min((recordingElapsed / MAX_DURATION_MS) * 100, 100)
+  const recordingSeconds = (recordingElapsed / 1000).toFixed(1)
 
   return (
     <div className="glass-card rounded-2xl overflow-hidden gradient-border">
@@ -316,26 +233,18 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
         {/* Camera Overlays */}
         {showCamera && (
           <>
-            {/* Scan overlay */}
             <div className="absolute inset-0 pointer-events-none z-10">
-              {/* Corner brackets */}
               <div className="absolute top-4 left-4 w-12 h-12 border-l-2 border-t-2 border-primary/50" />
               <div className="absolute top-4 right-4 w-12 h-12 border-r-2 border-t-2 border-primary/50" />
               <div className="absolute bottom-4 left-4 w-12 h-12 border-l-2 border-b-2 border-primary/50" />
               <div className="absolute bottom-4 right-4 w-12 h-12 border-r-2 border-b-2 border-primary/50" />
-
-              {/* Center crosshair */}
               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
                 <div className="w-16 h-16 border border-primary/30 rounded-full" />
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 bg-primary/30" />
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-1 bg-primary/30" />
               </div>
             </div>
-
-            {/* Scan line animation when recording */}
             {isRecording && <div className="scan-line z-10" />}
-
-            {/* Vignette overlay */}
             <div className="absolute inset-0 pointer-events-none z-10 bg-gradient-to-t from-background/30 via-transparent to-transparent" />
           </>
         )}
@@ -343,15 +252,12 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
         {/* Uploaded Video Overlay */}
         {showUploadedVideo && (
           <>
-            {/* Close button */}
             <button
               onClick={clearUploadedVideo}
               className="absolute top-4 left-4 z-20 p-2 rounded-lg bg-background/80 backdrop-blur-md border border-border/50 hover:bg-background transition-colors"
             >
               <X className="w-4 h-4 text-foreground" />
             </button>
-
-            {/* Video badge */}
             <div className="absolute top-4 right-4 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/60 backdrop-blur-md border border-primary/30">
               <Play className="w-3 h-3 text-primary fill-primary" />
               <span className="text-xs font-mono text-primary">UPLOADED</span>
@@ -359,7 +265,7 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
           </>
         )}
 
-        {/* Placeholder when nothing is active */}
+        {/* Placeholder */}
         {showPlaceholder && !isDragging && (
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <motion.div
@@ -370,14 +276,12 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
               <div className="w-24 h-24 rounded-2xl bg-secondary/30 flex items-center justify-center border border-border/30">
                 <Camera className="w-10 h-10 text-muted-foreground" />
               </div>
-
               <motion.div
                 className="absolute inset-0 rounded-2xl border border-primary/20"
                 animate={{ scale: [1, 1.2, 1], opacity: [0.5, 0, 0.5] }}
                 transition={{ duration: 2, repeat: Infinity }}
               />
             </motion.div>
-
             <p className="mt-6 text-muted-foreground font-medium">Camera Offline</p>
             <p className="text-sm text-muted-foreground/60 mt-1">Click below to enable or drop a video</p>
           </div>
@@ -422,17 +326,15 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-foreground">Recording</p>
-                    <p className="text-xs text-muted-foreground font-mono">{frameCount} frames captured</p>
+                    <p className="text-xs text-muted-foreground font-mono">{recordingSeconds}s / 5.0s</p>
                   </div>
                 </div>
-
                 <div className="text-right">
                   <p className="text-lg font-mono font-bold text-red-400">
                     {Math.round(recordingProgress)}%
                   </p>
                 </div>
               </div>
-
               <div className="mt-2 h-1 bg-secondary/50 rounded-full overflow-hidden">
                 <motion.div
                   className="h-full bg-gradient-to-r from-red-500 to-red-400"
@@ -445,22 +347,6 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
           )}
         </AnimatePresence>
 
-        {/* Processing upload indicator */}
-        <AnimatePresence>
-          {isProcessingUpload && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-background/80 backdrop-blur-md"
-            >
-              <div className="w-12 h-12 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-              <p className="mt-4 text-foreground font-medium">Processing video...</p>
-              <p className="text-sm text-muted-foreground">Extracting frames</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* Status badge for live camera */}
         {showCamera && !isRecording && (
           <div className="absolute top-4 right-4 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/60 backdrop-blur-md border border-emerald-500/30">
@@ -468,8 +354,6 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
             <span className="text-xs font-mono text-emerald-400">LIVE</span>
           </div>
         )}
-
-        <canvas ref={canvasRef} className="hidden" />
       </div>
 
       {/* Controls */}
@@ -529,10 +413,10 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
           {/* Upload button */}
           <motion.button
             onClick={() => fileInputRef.current?.click()}
-            disabled={isRecording || isProcessingUpload}
+            disabled={isRecording}
             className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-secondary/50 text-foreground font-medium border border-border/50 hover:bg-secondary hover:border-border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            whileHover={{ scale: isRecording || isProcessingUpload ? 1 : 1.02 }}
-            whileTap={{ scale: isRecording || isProcessingUpload ? 1 : 0.98 }}
+            whileHover={{ scale: isRecording ? 1 : 1.02 }}
+            whileTap={{ scale: isRecording ? 1 : 0.98 }}
           >
             <Upload className="w-4 h-4" />
             <span>Upload</span>
@@ -547,9 +431,9 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
           />
         </div>
 
-        {/* Captured frames info */}
+        {/* Video ready indicator */}
         <AnimatePresence>
-          {recordedFrames.length > 0 && !isRecording && !isProcessingUpload && (
+          {hasVideo && !isRecording && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
@@ -559,13 +443,9 @@ export function WebcamCapture({ onFramesCapture, isRecording, setIsRecording }: 
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-primary" />
-                  <span className="text-sm text-foreground font-medium">
-                    {recordedFrames.length} frames ready
-                  </span>
+                  <span className="text-sm text-foreground font-medium">Video ready</span>
                 </div>
-                <span className="text-xs font-mono text-primary">
-                  BUFFER_LOADED
-                </span>
+                <span className="text-xs font-mono text-primary">BUFFER_LOADED</span>
               </div>
             </motion.div>
           )}
