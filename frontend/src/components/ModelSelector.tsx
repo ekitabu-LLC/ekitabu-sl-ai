@@ -13,6 +13,7 @@ const modelVersions: ModelVersion[] = [
   { id: "ensemble_6_uniform", name: "6-Model Ensemble", architecture: "ST-GCN Multi-Stream", description: "Best overall: 72.9% combined", isRecommended: true },
   { id: "v43", name: "V43", architecture: "ST-GCN + SupCon + R&R", description: "Best single model: 65.7% combined" },
   { id: "v41", name: "V41", architecture: "ST-GCN GroupNorm + R&R", description: "Best numbers: 67.8%" },
+  { id: "v37", name: "V37", architecture: "ST-GCN GroupNorm + Speed Aug", description: "57.9% combined" },
   { id: "exp5", name: "Exp5", architecture: "ST-GCN + SupCon", description: "Best words: 65.4%" },
   { id: "exp1", name: "Exp1", architecture: "ST-GCN GroupNorm", description: "Baseline: 61.4%" },
 ]

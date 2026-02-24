@@ -69,6 +69,7 @@ try:
     )
     from train_ksl_v43 import KSLGraphNetV43
     from train_ksl_v41 import KSLGraphNetV41
+    from train_ksl_v37 import KSLGraphNetV37
     from train_ksl_v31_exp1 import KSLGraphNetV31Exp1
     from train_ksl_v31_exp5 import KSLGraphNetV25 as KSLGraphNetExp5
     from train_ksl_openhands import OpenHandsClassifier, OH_CONFIG
@@ -111,7 +112,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-AVAILABLE_MODELS = ["ensemble_6_uniform", "v43", "v41", "exp5", "exp1"]
+AVAILABLE_MODELS = ["ensemble_6_uniform", "v43", "v41", "v37", "exp5", "exp1"]
 
 # Ensemble members (order matters for consistent logging)
 ENSEMBLE_MEMBERS = ["v27", "v28", "v29", "exp1", "exp5", "openhands"]
@@ -120,7 +121,7 @@ ENSEMBLE_MEMBERS = ["v27", "v28", "v29", "exp1", "exp5", "openhands"]
 ADABN_MODELS = {"v43", "exp5", "v28", "v27", "v29", "openhands"}
 
 # Models that are multi-stream (3 separate checkpoints: joint/bone/velocity)
-MULTISTREAM_MODELS = {"v43", "v41", "exp5", "exp1", "v28"}
+MULTISTREAM_MODELS = {"v43", "v41", "v37", "exp5", "exp1", "v28"}
 
 # Models that are single-stream (1 checkpoint, ic=9)
 SINGLESTREAM_9CH = {"v27", "v29"}
@@ -129,6 +130,7 @@ SINGLESTREAM_9CH = {"v27", "v29"}
 CKPT_DIR_MAP = {
     "v43": "v43",
     "v41": "v41",
+    "v37": "v37",
     "exp1": "v31_exp1",
     "exp5": "v31_exp5",
     "v28": "v28",
@@ -213,6 +215,12 @@ class PTModelCache:
             )
         elif version == "v41":
             return KSLGraphNetV41(
+                nc=nc, num_signers=num_signers, aux_dim=AUX_DIM,
+                proj_dim=128, nn_=48, ic=3, hd=64, nl=4,
+                tk=(3, 5, 7), dr=0.3, spatial_dropout=0.1, adj=adj,
+            )
+        elif version == "v37":
+            return KSLGraphNetV37(
                 nc=nc, num_signers=num_signers, aux_dim=AUX_DIM,
                 proj_dim=128, nn_=48, ic=3, hd=64, nl=4,
                 tk=(3, 5, 7), dr=0.3, spatial_dropout=0.1, adj=adj,
