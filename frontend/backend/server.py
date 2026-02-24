@@ -101,7 +101,35 @@ ALL_CLASSES = NUMBER_CLASSES + WORD_CLASSES
 app = FastAPI(
     title="KSL Model API",
     version="3.0.0",
-    description="Kenya Sign Language Recognition API — multi-stream ST-GCN models"
+    description="""
+## Kenya Sign Language Recognition API
+
+Real-time sign language recognition using multi-stream Spatial-Temporal Graph Convolutional Networks (ST-GCN).
+
+### How it works
+1. Send base64-encoded video frames to `/predict`
+2. MediaPipe extracts hand and pose landmarks from each frame
+3. The selected model runs inference on the landmark streams
+4. Returns top-5 predicted signs with confidence scores
+
+### Models
+| Model | Architecture | Numbers | Words | Combined |
+|-------|-------------|---------|-------|----------|
+| `ensemble_6_uniform` | 6-model uniform ensemble | 74.6% | 71.6% | **72.9%** |
+| `v43` | ST-GCN + SupCon + R&R | 66.1% | 65.4% | 65.7% |
+| `v41` | ST-GCN GroupNorm + R&R | 67.8% | 55.6% | 60.7% |
+| `v37` | ST-GCN GroupNorm + Speed Aug | 57.9% | 57.9% | 57.9% |
+| `exp5` | ST-GCN + SupCon | 61.0% | 65.4% | 63.2% |
+| `exp1` | ST-GCN GroupNorm | 61.0% | 61.7% | 61.4% |
+
+### Sign Categories
+- **Numbers** (15 classes): 9, 17, 22, 35, 48, 54, 66, 73, 89, 91, 100, 125, 268, 388, 444
+- **Words** (15 classes): Agreement, Apple, Colour, Friend, Gift, Market, Monday, Picture, Proud, Sweater, Teach, Tomatoes, Tortoise, Twin, Ugali
+""",
+    openapi_tags=[
+        {"name": "inference", "description": "Sign language prediction endpoints"},
+        {"name": "system", "description": "Health check and model listing"},
+    ],
 )
 
 app.add_middleware(
@@ -416,9 +444,13 @@ class HealthResponse(BaseModel):
 # API Endpoints
 # ============================================================================
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health_check():
-    """Check API health and configuration."""
+    """
+    Check API health and runtime configuration.
+
+    Returns device type (cuda/cpu), mock mode status, and MediaPipe availability.
+    """
     return HealthResponse(
         status="healthy",
         device=str(model_cache.device),
@@ -427,9 +459,15 @@ async def health_check():
     )
 
 
-@app.get("/models", response_model=ModelsResponse)
+@app.get("/models", response_model=ModelsResponse, tags=["system"])
 async def get_models():
-    """List available models and checkpoints."""
+    """
+    List available models and which checkpoints are loaded on disk.
+
+    - **models**: all supported model versions
+    - **available_checkpoints**: models with checkpoint files present (format: `{model}_{category}`)
+    - **mode**: `real` if PyTorch models are available, `mock` otherwise
+    """
     return ModelsResponse(
         models=AVAILABLE_MODELS,
         available_checkpoints=model_cache.list_available() if not MOCK_MODE else [],
@@ -437,9 +475,61 @@ async def get_models():
     )
 
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post(
+    "/predict",
+    response_model=PredictResponse,
+    tags=["inference"],
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "numbers_ensemble": {
+                            "summary": "Ensemble — number sign",
+                            "value": {
+                                "frames": ["<base64_frame_1>", "<base64_frame_2>", "..."],
+                                "model_version": "ensemble_6_uniform",
+                                "model_type": "numbers"
+                            }
+                        },
+                        "words_v43": {
+                            "summary": "V43 — word sign",
+                            "value": {
+                                "frames": ["<base64_frame_1>", "<base64_frame_2>", "..."],
+                                "model_version": "v43",
+                                "model_type": "words"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
 async def predict(request: PredictRequest):
-    """Run inference on video frames."""
+    """
+    Run sign language recognition on a sequence of video frames.
+
+    ## Request
+    - **frames**: List of base64-encoded JPEG/PNG frames (minimum 10, recommended 30-90)
+    - **model_version**: Which model to use (see `/models` for available options)
+    - **model_type**: `numbers` for numeric signs, `words` for word signs
+
+    ## Response
+    Returns top-5 predicted signs with confidence scores (softmax probabilities).
+
+    ## Processing Pipeline
+    1. Decode base64 frames to images
+    2. Extract MediaPipe Holistic landmarks (hands + pose, no face)
+    3. Compute joint / bone / velocity streams
+    4. Run ST-GCN inference (or 6-model ensemble average)
+    5. Return ranked predictions
+
+    ## Notes
+    - Minimum 10 frames required; optimal range is 30-90 frames (~1-3 seconds at 30fps)
+    - `mode` in response will be `mock (fallback)` if real inference fails
+    - Confidence scores sum to 1.0 across all classes
+    """
     start_time = time.time()
 
     if request.model_version not in AVAILABLE_MODELS:
