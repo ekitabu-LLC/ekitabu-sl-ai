@@ -6,7 +6,7 @@
 
 The KSL Model API provides real-time Kenya Sign Language recognition from video frames. It uses multi-stream Spatial-Temporal Graph Convolutional Networks (ST-GCN) that operate on hand and pose landmarks extracted via MediaPipe.
 
-The API accepts a sequence of base64-encoded video frames, extracts skeletal landmarks, and returns the top-5 predicted sign labels with confidence scores.
+The API accepts an uploaded video file, extracts frames and skeletal landmarks, and returns the top-5 predicted sign labels with confidence scores.
 
 ### Interactive Documentation
 
@@ -98,16 +98,17 @@ List available models and which checkpoints are present on disk.
 
 ### POST /predict
 
-Run sign language recognition on a sequence of video frames.
+Run sign language recognition on an uploaded video file.
 
 **Tags:** `inference`
+**Content-Type:** `multipart/form-data`
 
-#### Request Body
+#### Request Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `frames` | string[] | Yes | -- | Base64-encoded JPEG or PNG frames (minimum 10, recommended 30-90) |
-| `model_version` | string | Yes | -- | Model to use (see [Models](#models) below) |
+| `video` | file | Yes | -- | Video file (mp4, webm, mov, avi) — minimum ~1 second of signing |
+| `model_version` | string | No | `"ensemble_6_uniform"` | Model to use (see [Models](#models) below) |
 | `model_type` | string | No | `"numbers"` | `"numbers"` for numeric signs, `"words"` for word signs |
 
 #### Response
@@ -127,20 +128,6 @@ Run sign language recognition on a sequence of video frames.
 | `label` | string | Predicted sign label |
 | `confidence` | float | Softmax probability (0.0 - 1.0) |
 | `rank` | int | Rank position (1 = highest confidence) |
-
-#### Example Request
-
-```json
-{
-  "frames": [
-    "/9j/4AAQSkZJRgABAQ...",
-    "/9j/4AAQSkZJRgABAQ...",
-    "..."
-  ],
-  "model_version": "ensemble_6_uniform",
-  "model_type": "numbers"
-}
-```
 
 #### Example Response
 
@@ -210,7 +197,7 @@ All error responses follow the structure:
 
 ## Inference Pipeline
 
-1. **Decode** -- Base64 strings are decoded into image arrays.
+1. **Frame extraction** -- OpenCV reads the uploaded video file and extracts up to 90 frames (subsampled if longer).
 2. **Landmark extraction** -- MediaPipe Holistic extracts 225 landmark coordinates per frame (hands + pose, no face mesh).
 3. **Stream computation** -- Raw landmarks are transformed into three streams:
    - **Joint** -- normalized (x, y, z) coordinates
@@ -220,11 +207,12 @@ All error responses follow the structure:
    - For the ensemble, all six member models run independently and their softmax outputs are averaged.
 5. **Ranking** -- The top-5 classes by probability are returned.
 
-### Frame Requirements
+### Video Requirements
 
-- **Minimum:** 10 frames (hard requirement; the API returns 400 otherwise)
-- **Recommended:** 30-90 frames (~1-3 seconds of video at 30 fps)
-- **Format:** JPEG or PNG, base64-encoded (with or without `data:image/...;base64,` prefix)
+- **Format:** mp4, webm, mov, avi (anything OpenCV can decode)
+- **Minimum length:** ~0.3 seconds (must yield at least 10 frames)
+- **Recommended length:** 1-3 seconds of signing
+- **Max frames:** 90 — longer videos are automatically subsampled
 
 ### Confidence Scores
 
@@ -244,44 +232,26 @@ curl http://localhost:8000/health
 # List models
 curl http://localhost:8000/models
 
-# Predict (with frames in a JSON file)
+# Predict from a video file
 curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d @request.json
-```
-
-Where `request.json` contains:
-
-```json
-{
-  "frames": ["<base64_frame_1>", "<base64_frame_2>", "..."],
-  "model_version": "ensemble_6_uniform",
-  "model_type": "numbers"
-}
+  -F "video=@sign.mp4" \
+  -F "model_version=ensemble_6_uniform" \
+  -F "model_type=numbers"
 ```
 
 ### Python (requests)
 
 ```python
-import base64
-import glob
 import requests
 
 API_URL = "http://localhost:8000"
 
-# Encode video frames as base64
-frame_paths = sorted(glob.glob("frames/*.jpg"))
-frames_b64 = []
-for path in frame_paths:
-    with open(path, "rb") as f:
-        frames_b64.append(base64.b64encode(f.read()).decode("utf-8"))
-
-# Run prediction
-response = requests.post(f"{API_URL}/predict", json={
-    "frames": frames_b64,
-    "model_version": "ensemble_6_uniform",
-    "model_type": "words",
-})
+with open("sign.mp4", "rb") as f:
+    response = requests.post(
+        f"{API_URL}/predict",
+        files={"video": ("sign.mp4", f, "video/mp4")},
+        data={"model_version": "ensemble_6_uniform", "model_type": "words"},
+    )
 
 data = response.json()
 for pred in data["predictions"]:
@@ -293,33 +263,28 @@ print(f"Processing time: {data['processing_time_ms']:.0f}ms")
 ### JavaScript (fetch)
 
 ```javascript
-// Capture frames from a <video> element as base64
-function captureFrames(video, count = 30) {
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext("2d");
-  const frames = [];
+// Record a video blob from the webcam (MediaRecorder API)
+async function recordAndPredict(stream, durationMs = 2000) {
+  const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+  const chunks = [];
 
-  for (let i = 0; i < count; i++) {
-    ctx.drawImage(video, 0, 0);
-    // Strip the data URL prefix -- the API accepts raw base64
-    const b64 = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
-    frames.push(b64);
-  }
-  return frames;
-}
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.start();
 
-// Send prediction request
-async function predict(frames, model = "ensemble_6_uniform", type = "numbers") {
+  await new Promise((resolve) => setTimeout(resolve, durationMs));
+  recorder.stop();
+  await new Promise((resolve) => (recorder.onstop = resolve));
+
+  const blob = new Blob(chunks, { type: "video/webm" });
+
+  const form = new FormData();
+  form.append("video", blob, "sign.webm");
+  form.append("model_version", "ensemble_6_uniform");
+  form.append("model_type", "numbers");
+
   const res = await fetch("http://localhost:8000/predict", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      frames,
-      model_version: model,
-      model_type: type,
-    }),
+    body: form,
   });
 
   if (!res.ok) {
@@ -331,8 +296,8 @@ async function predict(frames, model = "ensemble_6_uniform", type = "numbers") {
 }
 
 // Usage
-const frames = captureFrames(videoElement, 30);
-const result = await predict(frames, "ensemble_6_uniform", "words");
+const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+const result = await recordAndPredict(stream, 2000);
 console.log("Top prediction:", result.predictions[0].label);
 ```
 

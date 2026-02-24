@@ -26,11 +26,13 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import tempfile
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -107,10 +109,11 @@ app = FastAPI(
 Real-time sign language recognition using multi-stream Spatial-Temporal Graph Convolutional Networks (ST-GCN).
 
 ### How it works
-1. Send base64-encoded video frames to `/predict`
-2. MediaPipe extracts hand and pose landmarks from each frame
-3. The selected model runs inference on the landmark streams
-4. Returns top-5 predicted signs with confidence scores
+1. Upload a video file to `/predict` (mp4, webm, mov, avi)
+2. OpenCV extracts frames from the video
+3. MediaPipe extracts hand and pose landmarks from each frame
+4. The selected model runs inference on the landmark streams
+5. Returns top-5 predicted signs with confidence scores
 
 ### Models
 | Model | Architecture | Numbers | Words | Combined |
@@ -407,12 +410,6 @@ model_cache = PTModelCache()
 # API Models
 # ============================================================================
 
-class PredictRequest(BaseModel):
-    frames: List[str]  # Base64 encoded frames
-    model_version: str
-    model_type: str = "numbers"  # "numbers" or "words"
-
-
 class Prediction(BaseModel):
     label: str
     confidence: float
@@ -479,39 +476,17 @@ async def get_models():
     "/predict",
     response_model=PredictResponse,
     tags=["inference"],
-    openapi_extra={
-        "requestBody": {
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "numbers_ensemble": {
-                            "summary": "Ensemble — number sign",
-                            "value": {
-                                "frames": ["<base64_frame_1>", "<base64_frame_2>", "..."],
-                                "model_version": "ensemble_6_uniform",
-                                "model_type": "numbers"
-                            }
-                        },
-                        "words_v43": {
-                            "summary": "V43 — word sign",
-                            "value": {
-                                "frames": ["<base64_frame_1>", "<base64_frame_2>", "..."],
-                                "model_version": "v43",
-                                "model_type": "words"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 )
-async def predict(request: PredictRequest):
+async def predict(
+    video: UploadFile = File(..., description="Video file (mp4, webm, mov, avi)"),
+    model_version: str = Form("ensemble_6_uniform", description="Model to use for inference"),
+    model_type: str = Form("numbers", description="Sign category: 'numbers' or 'words'"),
+):
     """
-    Run sign language recognition on a sequence of video frames.
+    Run sign language recognition on an uploaded video file.
 
-    ## Request
-    - **frames**: List of base64-encoded JPEG/PNG frames (minimum 10, recommended 30-90)
+    ## Request (multipart/form-data)
+    - **video**: Video file (mp4, webm, mov, avi) — minimum ~1 second of signing
     - **model_version**: Which model to use (see `/models` for available options)
     - **model_type**: `numbers` for numeric signs, `words` for word signs
 
@@ -519,42 +494,38 @@ async def predict(request: PredictRequest):
     Returns top-5 predicted signs with confidence scores (softmax probabilities).
 
     ## Processing Pipeline
-    1. Decode base64 frames to images
+    1. Extract frames from the uploaded video using OpenCV
     2. Extract MediaPipe Holistic landmarks (hands + pose, no face)
     3. Compute joint / bone / velocity streams
     4. Run ST-GCN inference (or 6-model ensemble average)
     5. Return ranked predictions
 
     ## Notes
-    - Minimum 10 frames required; optimal range is 30-90 frames (~1-3 seconds at 30fps)
+    - Video must yield at least 10 frames; optimal length is 1-3 seconds
     - `mode` in response will be `mock (fallback)` if real inference fails
     - Confidence scores sum to 1.0 across all classes
     """
     start_time = time.time()
 
-    if request.model_version not in AVAILABLE_MODELS:
+    if model_version not in AVAILABLE_MODELS:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid model version. Available: {AVAILABLE_MODELS}",
         )
 
-    if not request.frames:
-        raise HTTPException(status_code=400, detail="No frames provided")
+    video_bytes = await video.read()
+    if not video_bytes:
+        raise HTTPException(status_code=400, detail="Empty video file")
 
-    if len(request.frames) < 10:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too few frames ({len(request.frames)}). Need at least 10.",
-        )
-
-    class_labels = WORD_CLASSES if request.model_type == "words" else NUMBER_CLASSES
+    class_labels = WORD_CLASSES if model_type == "words" else NUMBER_CLASSES
 
     if REAL_MODE_AVAILABLE and not MOCK_MODE:
         try:
+            frames = extract_frames_from_video(video_bytes)
             predictions, mode = await run_real_inference(
-                request.frames,
-                request.model_version,
-                request.model_type,
+                frames,
+                model_version,
+                model_type,
                 class_labels,
             )
         except Exception as e:
@@ -572,8 +543,8 @@ async def predict(request: PredictRequest):
 
     return PredictResponse(
         predictions=predictions,
-        model_version=request.model_version,
-        model_type=request.model_type,
+        model_version=model_version,
+        model_type=model_type,
         processing_time_ms=processing_time,
         mode=mode,
     )
@@ -583,13 +554,46 @@ async def predict(request: PredictRequest):
 # Inference Functions
 # ============================================================================
 
-def extract_landmarks(frames: List[str]) -> np.ndarray:
-    """Decode base64 frames and extract (T, 225) landmarks via MediaPipe."""
-    decoded = decode_base64_frames(frames)
-    if len(decoded) < 10:
-        raise ValueError(f"Only {len(decoded)} valid frames after decoding")
+MAX_FRAMES = 90  # Subsample long videos to this many frames
+
+
+def extract_frames_from_video(video_bytes: bytes) -> List[np.ndarray]:
+    """Write video bytes to a temp file, extract frames with OpenCV, return BGR arrays."""
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_path = tmp.name
+
+    try:
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            raise ValueError("Could not open video file")
+
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+        cap.release()
+    finally:
+        os.unlink(tmp_path)
+
+    if len(frames) < 10:
+        raise ValueError(f"Video too short: only {len(frames)} frames (need at least 10)")
+
+    # Subsample to MAX_FRAMES if the video is long
+    if len(frames) > MAX_FRAMES:
+        indices = np.linspace(0, len(frames) - 1, MAX_FRAMES, dtype=int)
+        frames = [frames[i] for i in indices]
+
+    logger.info(f"Extracted {len(frames)} frames from video")
+    return frames
+
+
+def extract_landmarks(frames: List[np.ndarray]) -> np.ndarray:
+    """Extract (T, 225) landmarks from BGR frame arrays via MediaPipe."""
     with MediaPipeExtractor() as extractor:
-        raw = extractor.extract_from_frames(decoded, include_face=False)
+        raw = extractor.extract_from_frames(frames, include_face=False)
     return raw  # shape (T, 225)
 
 
@@ -700,7 +704,7 @@ def run_member_inference(member_name: str, model_dict: dict, raw: np.ndarray,
 
 
 async def run_real_inference(
-    frames: List[str],
+    frames: List[np.ndarray],
     version: str,
     model_type: str,
     class_labels: List[str],
