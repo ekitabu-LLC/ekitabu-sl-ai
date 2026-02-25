@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"))
 
 from evaluate_real_testers_v30 import (
     NUMBER_CLASSES, WORD_CLASSES,

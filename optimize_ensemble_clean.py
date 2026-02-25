@@ -42,6 +42,9 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "old_experiments", "evaluate"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "old_experiments", "scripts"))
 
 from evaluate_real_testers_v30_phase1 import (
     discover_test_videos, preextract_test_data, adapt_bn_stats,

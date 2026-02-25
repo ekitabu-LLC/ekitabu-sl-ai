@@ -85,6 +85,10 @@ Thumbs.db
 .planning/
 .serena/
 
+# SLURM job logs
+slurm/*.out
+slurm/*.err
+
 # Backup directories
 modal_backup/
 
