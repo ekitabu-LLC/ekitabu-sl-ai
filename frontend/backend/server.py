@@ -42,6 +42,7 @@ from pydantic import BaseModel
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BACKEND_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "models"))
 sys.path.insert(0, str(BACKEND_DIR))
 
 # Configure logging
